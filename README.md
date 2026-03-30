@@ -2,8 +2,11 @@
 
 Convert documents (PDF, DOCX, PPTX, CSV) to LLM-friendly markdown, then chunk, index, and search with hybrid BM25 + vector retrieval — all in one interactive Streamlit app.
 
-<!-- Add a screenshot: replace the path below with your actual screenshot -->
-<!-- ![Doc2MD-RAG Screenshot](docs/screenshot.png) -->
+<p align="center">
+  <img src="docs/demo.gif" alt="Doc2MD-RAG Demo" width="800" />
+</p>
+
+> [Watch full demo video (MP4)](docs/demo.mp4)
 
 ## Features
 
