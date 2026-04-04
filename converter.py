@@ -22,15 +22,19 @@ def _extract_pdf(file_path: str, embed_images: bool = False) -> str:
 
 def _extract_docx(file_path: str) -> str:
     from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
     doc = Document(file_path)
     parts = []
-    for para in doc.paragraphs:
+
+    def _process_paragraph(para):
         style = para.style.name if para.style else ""
         text = para.text.strip()
         if not text:
             parts.append("")
-            continue
-        # Map heading styles to markdown headers
+            return
         if style.startswith("Heading 1"):
             parts.append(f"# {text}")
         elif style.startswith("Heading 2"):
@@ -42,18 +46,31 @@ def _extract_docx(file_path: str) -> str:
         else:
             parts.append(text)
 
-    # Extract tables
-    for table in doc.tables:
+    def _sanitize_cell(text):
+        """Replace newlines and pipes in cell text to preserve pipe-table format."""
+        text = text.strip()
+        text = text.replace("\n", "<br>")  # newlines → <br> (converted back by _clean_cell)
+        text = text.replace("|", "∣")      # avoid breaking pipe delimiters
+        return text
+
+    def _process_table(table):
         if not table.rows:
-            continue
-        headers = [cell.text.strip() for cell in table.rows[0].cells]
+            return
+        headers = [_sanitize_cell(cell.text) for cell in table.rows[0].cells]
         parts.append("")
         parts.append("| " + " | ".join(headers) + " |")
         parts.append("| " + " | ".join(["---"] * len(headers)) + " |")
         for row in table.rows[1:]:
-            cells = [cell.text.strip() for cell in row.cells]
+            cells = [_sanitize_cell(cell.text) for cell in row.cells]
             parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
+
+    # Iterate body elements in document order so tables appear inline
+    for element in doc.element.body:
+        if element.tag == qn("w:p"):
+            _process_paragraph(Paragraph(element, doc))
+        elif element.tag == qn("w:tbl"):
+            _process_table(Table(element, doc))
 
     return "\n".join(parts)
 
@@ -72,12 +89,17 @@ def _extract_pptx(file_path: str) -> str:
                         parts.append(text)
             if shape.has_table:
                 table = shape.table
-                headers = [cell.text.strip() for cell in table.rows[0].cells]
+
+                def _pptx_sanitize(text):
+                    text = text.strip().replace("\n", "<br>").replace("|", "∣")
+                    return text
+
+                headers = [_pptx_sanitize(cell.text) for cell in table.rows[0].cells]
                 parts.append("")
                 parts.append("| " + " | ".join(headers) + " |")
                 parts.append("| " + " | ".join(["---"] * len(headers)) + " |")
                 for row in list(table.rows)[1:]:
-                    cells = [cell.text.strip() for cell in row.cells]
+                    cells = [_pptx_sanitize(cell.text) for cell in row.cells]
                     parts.append("| " + " | ".join(cells) + " |")
                 parts.append("")
         parts.append("")
@@ -138,14 +160,32 @@ def _parse_pipe_row(line: str) -> list[str]:
 
 
 def _is_separator(line: str) -> bool:
-    """Check if a line is a markdown table separator (|---|---|)."""
-    return bool(re.match(r"^\|[-:\s|]+\|[ \t]*$", line.strip()))
+    """Check if a line is a markdown table separator (|---|---|).
+
+    Each cell must be only dashes with optional leading/trailing colons
+    (for alignment), e.g. |---|, |:---|, |:---:|, |---:|.
+    This avoids false-positives on data rows containing dashes or spaces.
+    """
+    stripped = line.strip()
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return False
+    # Remove outer pipes, split into cells
+    inner = stripped[1:-1]
+    if not inner:
+        return False
+    cells = inner.split("|")
+    # Every cell must match the separator pattern: optional colons around 3+ dashes
+    # (markdown spec requires at least 3 dashes per cell)
+    return all(re.match(r"^\s*:?-{3,}:?\s*$", cell) for cell in cells)
 
 
 def _table_to_list(lines: list[str]) -> str:
     """Convert parsed table lines into a nested bullet list."""
     if not lines:
         return ""
+
+    # Strip leading whitespace from each line (handle indented tables)
+    lines = [l.strip() for l in lines]
 
     # Find separator line
     sep_idx = -1
@@ -165,11 +205,11 @@ def _table_to_list(lines: list[str]) -> str:
         )
 
         data_start = sep_idx + 1
-        # If header row appears before the first separator AND there's real data above it, treat it as data
+        # Collect any rows above the header as data
         pre_header_rows = []
         if sep_idx > 1:
             for i in range(0, sep_idx - 1):
-                if lines[i].strip().startswith("|") and not _is_separator(lines[i]):
+                if lines[i].startswith("|") and not _is_separator(lines[i]):
                     pre_header_rows.append(lines[i])
     else:
         # No separator — treat first row as header
@@ -193,7 +233,10 @@ def _table_to_list(lines: list[str]) -> str:
         data_rows.append(_parse_pipe_row(line))
 
     if not data_rows:
-        return "\n".join(lines)
+        # Header-only table or empty — return just the header names as a note
+        if headers:
+            return "- " + ", ".join(h for h in headers if h) + "\n"
+        return ""
 
     # Determine real column names
     if not generic_headers or not headers:
@@ -208,17 +251,28 @@ def _table_to_list(lines: list[str]) -> str:
         result_lines.append(f"- **{label}**:")
         for j, header in enumerate(headers):
             value = row[j] if j < len(row) else ""
-            if value and value != label:
-                # Multi-line values get indented
-                value_lines = value.split("\n")
-                if len(value_lines) > 1:
+            if not value:
+                continue
+            # Skip only if value is identical to label (avoid repeating the row header)
+            if j == 0 and value.split("\n")[0].strip() == label:
+                # Still emit remaining lines if multi-line
+                extra_lines = value.split("\n")[1:]
+                extra_lines = [vl.strip() for vl in extra_lines if vl.strip()]
+                if extra_lines:
                     result_lines.append(f"  - {header}:")
-                    for vl in value_lines:
-                        vl = vl.strip()
-                        if vl:
-                            result_lines.append(f"    - {vl}")
-                else:
-                    result_lines.append(f"  - {header}: {value}")
+                    for vl in extra_lines:
+                        result_lines.append(f"    - {vl}")
+                continue
+            # Multi-line values get indented
+            value_lines = value.split("\n")
+            if len(value_lines) > 1:
+                result_lines.append(f"  - {header}:")
+                for vl in value_lines:
+                    vl = vl.strip()
+                    if vl:
+                        result_lines.append(f"    - {vl}")
+            else:
+                result_lines.append(f"  - {header}: {value}")
 
     return "\n".join(result_lines) + "\n"
 
@@ -226,39 +280,38 @@ def _table_to_list(lines: list[str]) -> str:
 def _normalize_double_pipes(markdown: str) -> str:
     """Normalize || (double pipes) in table rows — pymupdf4llm artifact.
 
-    Handles two cases:
-    1. Empty cells: |Cell1||Cell3| → |Cell1| |Cell3|
-    2. Joined rows: |---|---||Data| → split into two lines
+    Only handles the empty-cell case: |Cell1||Cell3| → |Cell1| |Cell3|
+    For joined rows (separator||data), we try to split them into separate lines,
+    but only when both halves look like complete pipe-table rows.
     """
     lines = markdown.split("\n")
     result = []
     for line in lines:
         stripped = line.strip()
-        if "||" in stripped and stripped.startswith("|"):
-            # Split at || — this may join a separator row with a data row
-            parts = stripped.split("||")
-            reconstructed = []
-            for p in parts:
-                p = p.strip()
-                if not p:
-                    continue
-                if not p.startswith("|"):
-                    p = "|" + p
-                if not p.endswith("|"):
-                    p = p + "|"
-                reconstructed.append(p)
-            if len(reconstructed) > 1:
-                # Check if any part is a separator — if so, split into separate lines
-                has_sep = any(_is_separator(r) for r in reconstructed)
-                if has_sep:
-                    result.extend(reconstructed)
-                else:
-                    # Just empty-cell normalization: rejoin with | |
-                    result.append(re.sub(r"\|\|", "| |", line))
-            else:
-                result.append(re.sub(r"\|\|", "| |", line))
-        else:
+        if "||" not in stripped or not stripped.startswith("|"):
             result.append(line)
+            continue
+
+        # Try to detect joined rows: |---|---||Data|Data|
+        # Each half must start and end with | and look like a full row
+        parts = stripped.split("||")
+        if len(parts) == 2:
+            left, right = parts
+            left = left.strip()
+            right = right.strip()
+            # Ensure both halves are well-formed pipe rows
+            if (left.startswith("|") and left.endswith("|") and
+                    right and not right.startswith("|")):
+                right = "|" + right
+                if not right.endswith("|"):
+                    right = right + "|"
+                # Only split if one half is a separator
+                if _is_separator(left) or _is_separator(right):
+                    result.extend([left, right])
+                    continue
+
+        # Default: treat || as empty cells
+        result.append(re.sub(r"\|\|", "| |", line))
     return "\n".join(result)
 
 
@@ -271,16 +324,21 @@ def _tables_to_lists(markdown: str) -> tuple:
     - Tables split across pages (continuation with new separator)
     - Headerless/generic-header tables
     - Double-pipe || artifacts (empty cells)
+    - CRLF line endings
+    - Indented tables (leading whitespace before |)
 
     Returns (transformed_markdown, tables_found_count).
     """
+    # Normalize line endings to LF
+    markdown = markdown.replace("\r\n", "\n").replace("\r", "\n")
+
     # Pre-process: normalize || to | | before table detection
     markdown = _normalize_double_pipes(markdown)
 
     # Pattern: any block of consecutive pipe-rows (possibly with separator lines)
-    # A table is 2+ consecutive lines starting with |
+    # A table is 2+ consecutive lines starting with | (with optional leading whitespace)
     table_pattern = re.compile(
-        r"((?:^\|.+\|[ \t]*$\n?){2,})",
+        r"((?:^[ \t]*\|.+\|[ \t]*$\n?){2,})",
         re.MULTILINE,
     )
 
@@ -300,6 +358,16 @@ def _tables_to_lists(markdown: str) -> tuple:
         return _table_to_list(lines)
 
     transformed = table_pattern.sub(_replace, markdown)
+
+    # Attach table titles to their content: collapse blank lines between
+    # a line that looks like a table caption and the bullet-list table body.
+    # This prevents chunking from splitting the title from the table data.
+    transformed = re.sub(
+        r"(_[^_\n]+_)\s*\n\n+(- \*\*)",
+        r"\1\n\2",
+        transformed,
+    )
+
     return transformed, tables_found
 
 

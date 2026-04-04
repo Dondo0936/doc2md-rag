@@ -21,9 +21,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from config import (
     CHUNKING_METHODS, CHUNKING_TOOLTIPS, SEARCH_MODES, SEARCH_TOOLTIPS,
-    EMBEDDING_MODELS, PARAM_TOOLTIPS, CHUNK_COLORS, MATCH_COLOR, MATCH_BORDER,
-    CHUNK_BORDER, SUPPORTED_EXTENSIONS, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP,
-    DEFAULT_BM25_WEIGHT, DEFAULT_VECTOR_WEIGHT, DEFAULT_TOP_K, DEFAULT_EMBEDDING_MODEL,
+    EMBEDDING_MODELS, EMBEDDING_API_KEY_ENV, PARAM_TOOLTIPS, CHUNK_COLORS,
+    MATCH_COLOR, MATCH_BORDER, CHUNK_BORDER, SUPPORTED_EXTENSIONS,
+    DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_BM25_WEIGHT,
+    DEFAULT_VECTOR_WEIGHT, DEFAULT_TOP_K, DEFAULT_EMBEDDING_MODEL,
     DEFAULT_SCORE_THRESHOLD, DEFAULT_NUM_CANDIDATES, INDEXING_EXPLAINERS, EVAL_METRICS,
 )
 from converter import process_document
@@ -152,8 +153,9 @@ for k, v in defaults.items():
 with st.sidebar:
     st.markdown('<p class="ed-title">Parameters</p>', unsafe_allow_html=True)
 
-    # ── API Key (stored in session state, never in os.environ)
+    # ── API Keys (stored in session state, never in os.environ)
     with st.expander("API Configuration", expanded=False):
+        st.markdown('<div class="section-label">CLAUDE VISION</div>', unsafe_allow_html=True)
         api_key = st.text_input(
             "Anthropic API Key", type="password",
             value=st.session_state.get("_api_key", os.environ.get("ANTHROPIC_API_KEY", "")),
@@ -161,9 +163,39 @@ with st.sidebar:
         )
         if api_key:
             st.session_state["_api_key"] = api_key
-            st.markdown('<span style="color:#10B981;font-size:0.8rem;">Connected</span>', unsafe_allow_html=True)
+            st.markdown('<span style="color:#10B981;font-size:0.8rem;">✓ Connected</span>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="api-hint">Set via sidebar or terminal:<br><code>export ANTHROPIC_API_KEY=sk-ant-...</code></div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="section-label">EMBEDDING PROVIDERS</div>', unsafe_allow_html=True)
+        st.caption("Only needed if you select an API-based embedding model below.")
+
+        openai_key = st.text_input(
+            "OpenAI API Key", type="password",
+            value=st.session_state.get("_openai_key", os.environ.get("OPENAI_API_KEY", "")),
+            help="Required for text-embedding-3-small/large. Get yours at platform.openai.com.",
+        )
+        if openai_key:
+            st.session_state["_openai_key"] = openai_key
+            st.markdown('<span style="color:#10B981;font-size:0.8rem;">✓ OpenAI connected</span>', unsafe_allow_html=True)
+
+        voyage_key = st.text_input(
+            "Voyage AI API Key", type="password",
+            value=st.session_state.get("_voyage_key", os.environ.get("VOYAGE_API_KEY", "")),
+            help="Required for voyage-3.5-lite. Anthropic-recommended embeddings. Get yours at dash.voyageai.com.",
+        )
+        if voyage_key:
+            st.session_state["_voyage_key"] = voyage_key
+            st.markdown('<span style="color:#10B981;font-size:0.8rem;">✓ Voyage AI connected</span>', unsafe_allow_html=True)
+
+        gemini_key = st.text_input(
+            "Google Gemini API Key", type="password",
+            value=st.session_state.get("_gemini_key", os.environ.get("GEMINI_API_KEY", "")),
+            help="Required for gemini-embedding-001 / text-embedding-004. Get yours at aistudio.google.com.",
+        )
+        if gemini_key:
+            st.session_state["_gemini_key"] = gemini_key
+            st.markdown('<span style="color:#10B981;font-size:0.8rem;">✓ Gemini connected</span>', unsafe_allow_html=True)
 
     st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
 
@@ -200,7 +232,24 @@ with st.sidebar:
     # ── EMBEDDING SECTION
     st.markdown('<div class="section-label">EMBEDDING</div>', unsafe_allow_html=True)
     emb_model = st.selectbox("Model", list(EMBEDDING_MODELS.keys()), help=PARAM_TOOLTIPS["embedding_model"])
-    st.caption(EMBEDDING_MODELS[emb_model]["desc"])
+    emb_info = EMBEDDING_MODELS[emb_model]
+    st.caption(emb_info["desc"])
+
+    # Warn if API-based model selected without the required key
+    _emb_provider = emb_info.get("provider", "local")
+    _emb_api_key = None
+    if _emb_provider == "openai":
+        _emb_api_key = st.session_state.get("_openai_key", os.environ.get("OPENAI_API_KEY"))
+        if not _emb_api_key:
+            st.warning("OpenAI API key required. Enter it under API Configuration above.")
+    elif _emb_provider == "voyage":
+        _emb_api_key = st.session_state.get("_voyage_key", os.environ.get("VOYAGE_API_KEY"))
+        if not _emb_api_key:
+            st.warning("Voyage AI API key required. Enter it under API Configuration above.")
+    elif _emb_provider == "google":
+        _emb_api_key = st.session_state.get("_gemini_key", os.environ.get("GEMINI_API_KEY"))
+        if not _emb_api_key:
+            st.warning("Google Gemini API key required. Enter it under API Configuration above.")
 
     st.markdown('<hr class="sidebar-divider">', unsafe_allow_html=True)
 
@@ -254,7 +303,7 @@ with col_search:
 
 # ─── Process Document ───────────────────────────────────────────
 
-current_params = (chunk_method, chunk_size, chunk_overlap, semantic_threshold, emb_model)
+current_params = (chunk_method, chunk_size, chunk_overlap, semantic_threshold, emb_model, _emb_provider, bool(_emb_api_key), bool(st.session_state.get("_api_key")))
 
 if uploaded is not None:
     file_bytes = uploaded.getvalue()
@@ -286,7 +335,7 @@ if uploaded is not None:
                 log.append(f"**Processed** {stats['images_found']} image reference(s)")
 
                 st.session_state.pipeline_stage = 3
-                engine = RAGEngine(embedding_model_name=emb_model)
+                engine = RAGEngine(embedding_model_name=emb_model, embedding_api_key=_emb_api_key)
                 engine.index_document(
                     result["final_markdown"], source=uploaded.name,
                     method=chunk_method, chunk_size=chunk_size,

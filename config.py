@@ -28,10 +28,47 @@ SEARCH_TOOLTIPS = {
 
 # ─── Embedding ───────────────────────────────────────────────────
 EMBEDDING_MODELS = {
-    "all-MiniLM-L6-v2": {"dim": 384, "desc": "Fast, 80MB. Good balance of speed and quality."},
-    "all-mpnet-base-v2": {"dim": 768, "desc": "Higher quality, 420MB. Better semantic understanding."},
+    # Local models (no API key required)
+    "all-MiniLM-L6-v2": {
+        "dim": 384, "provider": "local",
+        "desc": "Fast, 80MB. Good balance of speed and quality. No API key needed.",
+    },
+    "all-mpnet-base-v2": {
+        "dim": 768, "provider": "local",
+        "desc": "Higher quality, 420MB. Better semantic understanding. No API key needed.",
+    },
+    # OpenAI models (requires OPENAI_API_KEY)
+    "text-embedding-3-small": {
+        "dim": 1536, "provider": "openai",
+        "desc": "OpenAI. Fast, cheap, 1536d. Great quality-to-cost ratio. Requires API key.",
+    },
+    "text-embedding-3-large": {
+        "dim": 3072, "provider": "openai",
+        "desc": "OpenAI. Highest quality, 3072d. Best for precision-critical tasks. Requires API key.",
+    },
+    # Voyage AI models (Anthropic's recommended embedding provider, requires VOYAGE_API_KEY)
+    "voyage-3.5-lite": {
+        "dim": 1024, "provider": "voyage",
+        "desc": "Voyage AI (Anthropic-recommended). Fast, 1024d. Optimized for retrieval. Requires API key.",
+    },
+    # Google Gemini models (requires GEMINI_API_KEY)
+    "gemini-embedding-001": {
+        "dim": 768, "provider": "google",
+        "desc": "Google Gemini. 768d, multimodal-capable. Good for mixed content. Requires API key.",
+    },
+    "text-embedding-004": {
+        "dim": 768, "provider": "google",
+        "desc": "Google. 768d, text-only. Fast and reliable. Requires API key.",
+    },
 }
 DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+# Provider → environment variable mapping
+EMBEDDING_API_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "voyage": "VOYAGE_API_KEY",
+    "google": "GEMINI_API_KEY",
+}
 
 # ─── Parameter Tooltips ─────────────────────────────────────────
 PARAM_TOOLTIPS = {

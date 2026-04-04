@@ -1,7 +1,9 @@
 """Tests for rag_engine.py — chunking, indexing, search, evaluation."""
 
 import pytest
-from rag_engine import RAGEngine
+import numpy as np
+from unittest.mock import patch, MagicMock
+from rag_engine import RAGEngine, EmbeddingModel
 from tests.conftest import SAMPLE_MARKDOWN
 
 
@@ -176,3 +178,70 @@ class TestClear:
         assert indexed_engine.bm25 is None
         assert indexed_engine.faiss_index is None
         assert indexed_engine.chunk_embeddings is None
+
+
+# ─── API Embedding Providers (mocked) ────────────────────────────────
+
+class TestEmbeddingModel:
+    def test_local_model_loads(self):
+        """Local SentenceTransformer model initializes and encodes."""
+        model = EmbeddingModel("all-MiniLM-L6-v2")
+        assert model.provider == "local"
+        result = model.encode(["hello world"])
+        assert result.shape == (1, 384)
+
+    @patch("openai.OpenAI")
+    def test_openai_embedding(self, mock_openai_cls):
+        """OpenAI embedding calls the API and returns normalized vectors."""
+        # Mock the response
+        mock_client = MagicMock()
+        mock_openai_cls.return_value = mock_client
+        mock_embedding = MagicMock()
+        mock_embedding.embedding = [0.1] * 1536
+        mock_response = MagicMock()
+        mock_response.data = [mock_embedding]
+        mock_client.embeddings.create.return_value = mock_response
+
+        model = EmbeddingModel("text-embedding-3-small", api_key="sk-test")
+        result = model.encode(["hello"])
+        assert result.shape == (1, 1536)
+        # Check normalization
+        norm = np.linalg.norm(result[0])
+        assert abs(norm - 1.0) < 0.01
+
+    @patch("voyageai.Client")
+    def test_voyage_embedding(self, mock_voyage_cls):
+        """Voyage AI embedding calls the API and returns normalized vectors."""
+        mock_client = MagicMock()
+        mock_voyage_cls.return_value = mock_client
+        mock_client.embed.return_value = MagicMock(embeddings=[[0.1] * 1024])
+
+        model = EmbeddingModel("voyage-3.5-lite", api_key="pa-test")
+        result = model.encode(["hello"])
+        assert result.shape == (1, 1024)
+        norm = np.linalg.norm(result[0])
+        assert abs(norm - 1.0) < 0.01
+
+    @patch("google.generativeai.configure")
+    @patch("google.generativeai.embed_content")
+    def test_google_embedding(self, mock_embed, mock_configure):
+        """Google Gemini embedding calls the API and returns normalized vectors."""
+        mock_embed.return_value = {"embedding": [0.1] * 768}
+
+        model = EmbeddingModel("gemini-embedding-001", api_key="AI-test")
+        result = model.encode(["hello"])
+        assert result.shape == (1, 768)
+        norm = np.linalg.norm(result[0])
+        assert abs(norm - 1.0) < 0.01
+
+    def test_unknown_provider_raises(self):
+        """Unknown provider raises ValueError."""
+        with patch.dict("config.EMBEDDING_MODELS", {"fake-model": {"dim": 100, "provider": "unknown"}}):
+            with pytest.raises(ValueError, match="Unknown embedding provider"):
+                EmbeddingModel("fake-model")
+
+    def test_encode_single_string(self):
+        """Passing a single string (not list) works."""
+        model = EmbeddingModel("all-MiniLM-L6-v2")
+        result = model.encode("hello world")
+        assert result.shape == (1, 384)

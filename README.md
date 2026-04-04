@@ -13,6 +13,7 @@ Convert documents (PDF, DOCX, PPTX, CSV) to LLM-friendly markdown, then chunk, i
 - **Document conversion** — PDF (pymupdf4llm), DOCX (python-docx), PPTX (python-pptx), CSV (pandas). Tables are converted to nested bullet lists for better LLM chunking. Images can be described by Claude Vision.
 - **4 chunking strategies** — Recursive, By Sentence, By Markdown Headers, Semantic (embedding-based).
 - **3 search modes** — Hybrid (BM25 + Vector), Vector-only (KNN), Lexical-only (BM25).
+- **7 embedding models** — Local (SentenceTransformers) or API-based (OpenAI, Voyage AI, Google Gemini). Swap models without changing code.
 - **Tunable parameters** — Chunk size, overlap, search weights, score threshold, dedup threshold, embedding model — all with hover tooltips explaining their effect.
 - **RAG pipeline tracer** — Visualize query tokenization, embedding space (PCA/t-SNE), BM25 token matches, and score fusion breakdown.
 - **Prompt builder** — Auto-assembles retrieved chunks into a copy-paste-ready LLM prompt with token estimation.
@@ -60,7 +61,7 @@ doc2md-rag/
 1. **Upload** — Drop a PDF, DOCX, PPTX, or CSV (up to 100MB)
 2. **Convert** — Document is parsed to markdown. Pipe-tables become nested bullet lists. Images get AI descriptions (with API key) or placeholders.
 3. **Chunk** — Markdown is split into overlapping pieces using your chosen strategy.
-4. **Embed** — Each chunk is encoded into a dense vector using SentenceTransformers.
+4. **Embed** — Each chunk is encoded into a dense vector using your chosen model (local SentenceTransformers or API-based OpenAI/Voyage/Google).
 5. **Index** — FAISS (vector) and BM25 (keyword) indexes are built in parallel.
 6. **Search** — Your query is scored against both indexes. Scores are normalized, weighted, combined, filtered, and deduplicated.
 
@@ -75,7 +76,33 @@ doc2md-rag/
 | Vector weight | 0.6 | Weight for semantic similarity (Hybrid mode) |
 | Top K | 5 | Number of results returned |
 | Score threshold | 0.0 | Minimum score to include a result |
-| Embedding model | all-MiniLM-L6-v2 | 384d, fast. Alternative: all-mpnet-base-v2 (768d) |
+| Embedding model | all-MiniLM-L6-v2 | 384d, fast. See full list below |
+
+## Embedding Models
+
+| Model | Provider | Dimensions | API Key Required |
+|---|---|---|---|
+| all-MiniLM-L6-v2 | Local (SentenceTransformers) | 384 | No |
+| all-mpnet-base-v2 | Local (SentenceTransformers) | 768 | No |
+| text-embedding-3-small | OpenAI | 1536 | `OPENAI_API_KEY` |
+| text-embedding-3-large | OpenAI | 3072 | `OPENAI_API_KEY` |
+| voyage-3.5-lite | Voyage AI (Anthropic-recommended) | 1024 | `VOYAGE_API_KEY` |
+| gemini-embedding-001 | Google Gemini (multimodal) | 768 | `GEMINI_API_KEY` |
+| text-embedding-004 | Google | 768 | `GEMINI_API_KEY` |
+
+Local models run on your machine with no API key. API-based models require the corresponding key — enter it in the sidebar under "API Configuration" or set the environment variable.
+
+To install optional embedding providers:
+
+```bash
+# All providers
+pip install openai voyageai google-generativeai
+
+# Or install only what you need
+pip install openai          # for text-embedding-3-*
+pip install voyageai        # for voyage-3.5-lite
+pip install google-generativeai  # for gemini-embedding-001 / text-embedding-004
+```
 
 ## Running Tests
 

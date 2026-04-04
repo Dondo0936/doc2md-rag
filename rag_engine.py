@@ -2,25 +2,96 @@
 
 import re
 import math
+import logging
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from rank_bm25 import BM25Okapi
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 import faiss
 
-from config import DEFAULT_EMBEDDING_MODEL
+from config import DEFAULT_EMBEDDING_MODEL, EMBEDDING_MODELS
+
+logger = logging.getLogger(__name__)
+
+
+# ─── Embedding Wrapper ─────────────────────────────────────────
+
+class EmbeddingModel:
+    """Unified interface for local and API-based embedding models."""
+
+    def __init__(self, model_name, api_key=None):
+        self.model_name = model_name
+        self._api_key = api_key
+        model_info = EMBEDDING_MODELS.get(model_name, {})
+        self.provider = model_info.get("provider", "local")
+        self.dim = model_info.get("dim", 384)
+        self._client = None
+
+        if self.provider == "local":
+            from sentence_transformers import SentenceTransformer
+            self._client = SentenceTransformer(model_name)
+        elif self.provider == "openai":
+            import openai
+            self._client = openai.OpenAI(api_key=api_key)
+        elif self.provider == "voyage":
+            import voyageai
+            self._client = voyageai.Client(api_key=api_key)
+        elif self.provider == "google":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            self._client = genai
+        else:
+            raise ValueError(f"Unknown embedding provider: {self.provider}")
+
+    def encode(self, texts, normalize_embeddings=True):
+        """Encode texts to numpy array of embeddings. Returns shape (n, dim)."""
+        if isinstance(texts, str):
+            texts = [texts]
+
+        if self.provider == "local":
+            return self._client.encode(texts, normalize_embeddings=normalize_embeddings)
+
+        elif self.provider == "openai":
+            response = self._client.embeddings.create(
+                model=self.model_name, input=texts
+            )
+            embeddings = np.array([d.embedding for d in response.data], dtype=np.float32)
+
+        elif self.provider == "voyage":
+            response = self._client.embed(texts, model=self.model_name)
+            embeddings = np.array(response.embeddings, dtype=np.float32)
+
+        elif self.provider == "google":
+            result = self._client.embed_content(
+                model=f"models/{self.model_name}",
+                content=texts if len(texts) > 1 else texts[0],
+            )
+            if isinstance(result["embedding"][0], list):
+                embeddings = np.array(result["embedding"], dtype=np.float32)
+            else:
+                embeddings = np.array([result["embedding"]], dtype=np.float32)
+
+        else:
+            raise ValueError(f"Unknown provider: {self.provider}")
+
+        # Normalize if requested (API providers don't always return normalized vectors)
+        if normalize_embeddings:
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1, norms)
+            embeddings = embeddings / norms
+
+        return embeddings
 
 
 class RAGEngine:
-    def __init__(self, embedding_model_name: str = DEFAULT_EMBEDDING_MODEL):
-        self.model = SentenceTransformer(embedding_model_name)
+    def __init__(self, embedding_model_name=DEFAULT_EMBEDDING_MODEL, embedding_api_key=None):
+        self.model = EmbeddingModel(embedding_model_name, api_key=embedding_api_key)
         self.model_name = embedding_model_name
-        self.chunks: list[dict] = []
-        self.bm25: BM25Okapi | None = None
-        self.faiss_index: faiss.IndexFlatIP | None = None
-        self.chunk_embeddings: np.ndarray | None = None
-        self._idf_cache: dict[str, float] = {}
-        self._total_doc_chars: int = 0
+        self.chunks = []
+        self.bm25 = None
+        self.faiss_index = None
+        self.chunk_embeddings = None
+        self._idf_cache = {}
+        self._total_doc_chars = 0
 
     # ─── Chunking ───────────────────────────────────────────────
 

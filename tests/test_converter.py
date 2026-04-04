@@ -73,6 +73,15 @@ class TestIsSeparator:
         assert not _is_separator("| A | B | C |")
         assert not _is_separator("just text")
 
+    def test_data_with_dashes_not_separator(self):
+        """Data rows containing dashes should NOT be treated as separators."""
+        assert not _is_separator("| - | - |")
+        assert not _is_separator("| -- note -- | text |")
+        assert not _is_separator("| | |")  # empty cells
+
+    def test_separator_with_spaces(self):
+        assert _is_separator("|  ---  |  ---  |")
+
 
 # ─── Table to List Conversion ─────────────────────────────────────
 
@@ -132,6 +141,26 @@ class TestTablesToLists:
         result, count = _tables_to_lists(SAMPLE_TABLE_DOUBLE_PIPES)
         assert count >= 0  # May or may not detect as table
         # Should not crash regardless
+
+    def test_crlf_line_endings(self):
+        """Tables with CRLF line endings should still be detected."""
+        table = "| Name | Age |\r\n| --- | --- |\r\n| Alice | 30 |\r\n"
+        result, count = _tables_to_lists(table)
+        assert count == 1
+        assert "Alice" in result
+
+    def test_indented_table(self):
+        """Tables with leading whitespace should be detected."""
+        table = "  | Name | Age |\n  | --- | --- |\n  | Alice | 30 |\n"
+        result, count = _tables_to_lists(table)
+        assert count == 1
+        assert "Alice" in result
+
+    def test_header_only_table(self):
+        """A table with only header + separator should not leave raw pipe syntax."""
+        table = "| Name | Age |\n| --- | --- |\n"
+        result, count = _tables_to_lists(table)
+        assert "| --- |" not in result
 
 
 # ─── Image Handling ──────���─────────────────────────────────────────
