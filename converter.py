@@ -56,11 +56,40 @@ def _extract_docx(file_path: str) -> str:
     def _process_table(table):
         if not table.rows:
             return
-        headers = [_sanitize_cell(cell.text) for cell in table.rows[0].cells]
+
+        def _is_merged_row(row):
+            """Detect merged rows where all non-empty cells contain identical text."""
+            texts = [cell.text.strip() for cell in row.cells]
+            unique = set(t for t in texts if t)
+            return len(unique) == 1 and unique
+
+        # Find the real header row (skip leading merged section headers)
+        header_idx = 0
+        for idx, row in enumerate(table.rows):
+            if _is_merged_row(row):
+                text = next(t for t in (cell.text.strip() for cell in row.cells) if t)
+                parts.append("")
+                parts.append(f"### {text}")
+                header_idx = idx + 1
+            else:
+                break
+
+        if header_idx >= len(table.rows):
+            return
+
+        headers = [_sanitize_cell(cell.text) for cell in table.rows[header_idx].cells]
         parts.append("")
         parts.append("| " + " | ".join(headers) + " |")
         parts.append("| " + " | ".join(["---"] * len(headers)) + " |")
-        for row in table.rows[1:]:
+        for row in table.rows[header_idx + 1:]:
+            if _is_merged_row(row):
+                text = next(t for t in (cell.text.strip() for cell in row.cells) if t)
+                parts.append("")
+                parts.append(f"### {text}")
+                parts.append("")
+                parts.append("| " + " | ".join(headers) + " |")
+                parts.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                continue
             cells = [_sanitize_cell(cell.text) for cell in row.cells]
             parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
@@ -154,21 +183,29 @@ def _clean_cell(text: str) -> str:
     lines = text.split("\n")
     if len(lines) > 1:
         merged = [lines[0]]
+        in_list = False  # after a colon-ended line, keep items separate
         for line in lines[1:]:
             stripped = line.strip()
             if not stripped:
                 merged.append("")
+                in_list = False
                 continue
             # Keep as new line if it starts with a bullet/list marker
             if re.match(r"^[-●○*■□▪▸►•]\s", stripped) or re.match(r"^\d+[.)]\s", stripped):
                 merged.append(stripped)
+                in_list = False
                 continue
             prev = merged[-1].rstrip() if merged else ""
+            # After a colon-ended line, keep subsequent items on separate lines
+            if in_list:
+                merged.append(stripped)
+                if stripped.endswith((".", ":", "!", "?", ";")):
+                    in_list = stripped.endswith(":")
+                continue
             # Join if previous line doesn't end with sentence punctuation
             if prev and not prev.endswith((".", ":", "!", "?", ";")) and not prev.endswith("  "):
                 # Detect mid-word/identifier breaks: both fragments have no spaces
                 # and at least one contains identifier chars like _ or .
-                # (e.g. "GREATE"+"R_THAN" → "GREATER_THAN", "POLI"+"CY.data" → "POLICY.data")
                 prev_token = prev.split("\n")[-1].strip()
                 prev_is_token = " " not in prev_token
                 cur_is_token = " " not in stripped
@@ -181,6 +218,8 @@ def _clean_cell(text: str) -> str:
                     merged[-1] = prev + " " + stripped
             else:
                 merged.append(stripped)
+                if prev.endswith(":"):
+                    in_list = True
         text = "\n".join(merged)
     return text
 
@@ -236,7 +275,7 @@ def _table_to_list(lines: list[str]) -> str:
         # The row above separator might also be a data row if headers are generic
         # (e.g. "Col1", "Col2") — detect and include it as data
         generic_headers = all(
-            re.match(r"^(Col\d+|Component|Visual|Description|Data sample|)$", h, re.IGNORECASE)
+            re.match(r"^(Col\s*\d+|)$", h, re.IGNORECASE)
             for h in headers
         )
 
@@ -275,7 +314,7 @@ def _table_to_list(lines: list[str]) -> str:
         return ""
 
     # Determine real column names
-    if not generic_headers or not headers:
+    if generic_headers or not headers:
         # Use Col1, Col2, ... as fallback
         max_cols = max(len(r) for r in data_rows) if data_rows else 1
         headers = [f"Col {i+1}" for i in range(max_cols)]
@@ -293,7 +332,7 @@ def _table_to_list(lines: list[str]) -> str:
                 if not val:
                     continue
                 if j < len(prev) and prev[j].strip():
-                    prev[j] = prev[j].rstrip() + " " + val
+                    prev[j] = prev[j].rstrip() + "\n" + val
                 elif j < len(prev):
                     prev[j] = val
                 else:
@@ -305,6 +344,13 @@ def _table_to_list(lines: list[str]) -> str:
 
     result_lines = []
     for i, row in enumerate(data_rows):
+        # Detect merged rows: all non-empty cells identical → section heading
+        non_empty = [c.strip() for c in row if c.strip()]
+        unique_vals = set(non_empty)
+        if len(unique_vals) == 1 and len(non_empty) > 1:
+            result_lines.append(f"\n### {non_empty[0]}\n")
+            continue
+
         # Use first cell as label; if empty, try second cell; last resort "Row N"
         label = row[0].split("\n")[0].strip() if row and row[0].strip() else ""
         if not label and len(row) > 1 and row[1].strip():
@@ -526,6 +572,8 @@ def process_document(file_path: str, llm_client=None) -> dict:
     tables_converted, tables_found = _tables_to_lists(raw_markdown)
 
     final_markdown, images_found = _handle_images(tables_converted, llm_client=llm_client)
+    # Strip stray DOCX tab/sheet names (e.g. "Thẻ 1", "Thẻ 2")
+    final_markdown = re.sub(r"^\s*Thẻ\s+\d+\s*$", "", final_markdown, flags=re.MULTILINE)
 
     return {
         "raw_markdown": raw_markdown,
