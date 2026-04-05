@@ -15,9 +15,58 @@ MAX_FILE_SIZE_MB = 100
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 
+def _fitz_table_for_page(page) -> str:
+    """Fallback: extract tables from a fitz page using find_tables()."""
+    tables = page.find_tables()
+    if not tables.tables:
+        return ""
+    main_table = max(tables.tables, key=lambda t: len(t.cells))
+    data = main_table.extract()
+    if not data:
+        return ""
+    active_cols = sorted({
+        j for row in data for j, v in enumerate(row) if v and v.strip()
+    })
+    if not active_cols:
+        return ""
+    clean_rows = []
+    for row in data:
+        clean_row = []
+        for j in active_cols:
+            val = row[j] if j < len(row) and row[j] else ""
+            val = val.replace("\n", "<br>").replace("|", "∣").strip()
+            clean_row.append(val)
+        clean_rows.append(clean_row)
+    num_cols = len(active_cols)
+    lines = ["| " + " | ".join(clean_rows[0]) + " |"]
+    lines.append("| " + " | ".join(["---"] * num_cols) + " |")
+    for row in clean_rows[1:]:
+        while len(row) < num_cols:
+            row.append("")
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def _extract_pdf(file_path: str, embed_images: bool = False) -> str:
     import pymupdf4llm
-    return pymupdf4llm.to_markdown(file_path, embed_images=embed_images)
+    import fitz
+
+    md_pages = pymupdf4llm.to_markdown(file_path, page_chunks=True,
+                                        embed_images=embed_images)
+
+    doc = fitz.open(file_path)
+    parts = []
+    for chunk in md_pages:
+        page_text = chunk["text"].strip()
+        page_num = chunk["metadata"]["page"]
+        if len(page_text) <= 10 and page_num < len(doc):
+            table_md = _fitz_table_for_page(doc[page_num])
+            if table_md:
+                parts.append(table_md)
+                continue
+        parts.append(chunk["text"])
+    doc.close()
+    return "\n\n".join(parts)
 
 
 def _extract_docx(file_path: str) -> str:
