@@ -1,18 +1,123 @@
 # converter.py — Document → Markdown conversion with post-processing
 #
 # Pipeline: Extract raw markdown → Convert tables to lists → Handle image descriptions
-# Uses pymupdf4llm (PDF), python-docx (DOCX), python-pptx (PPTX), pandas (CSV)
+# Backends: pypandoc (DOCX), pymupdf4llm+fitz (PDF), markitdown/python-pptx (PPTX)
 
 import logging
 import re
 import os
 import tempfile
 import pandas as pd
+from html.parser import HTMLParser
 
 logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_MB = 100
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+# ─── HTML Table → Pipe Table Converter ────────────────────────
+
+class _HTMLTableParser(HTMLParser):
+    """Parse HTML tables into a list of rows (list of cell strings)."""
+    def __init__(self):
+        super().__init__()
+        self.tables = []
+        self._table = None
+        self._row = None
+        self._cell = None
+        self._in_cell = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._table = []
+        elif tag == "tr":
+            self._row = []
+        elif tag in ("td", "th"):
+            self._cell = []
+            self._in_cell = True
+        elif tag == "p" and self._in_cell and self._cell:
+            self._cell.append("<br>")
+
+    def handle_endtag(self, tag):
+        if tag == "table" and self._table is not None:
+            self.tables.append(self._table)
+            self._table = None
+        elif tag == "tr" and self._row is not None:
+            if self._table is not None:
+                self._table.append(self._row)
+            self._row = None
+        elif tag in ("td", "th") and self._cell is not None:
+            text = "".join(self._cell).strip()
+            text = re.sub(r"<br>\s*$", "", text)
+            if self._row is not None:
+                self._row.append(text)
+            self._cell = None
+            self._in_cell = False
+
+    def handle_data(self, data):
+        if self._in_cell and self._cell is not None:
+            self._cell.append(data)
+
+
+def _html_tables_to_pipe(md_text: str) -> str:
+    """Convert HTML <table> blocks in markdown to pipe-delimited tables."""
+    table_re = re.compile(r"<table[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE)
+
+    def _convert(match):
+        parser = _HTMLTableParser()
+        parser.feed(match.group(0))
+        if not parser.tables:
+            return match.group(0)
+        table = parser.tables[0]
+        if not table:
+            return ""
+        max_cols = max(len(r) for r in table)
+        lines = []
+        for i, row in enumerate(table):
+            while len(row) < max_cols:
+                row.append("")
+            cells = [c.replace("|", "∣").replace("\n", "<br>") for c in row]
+            lines.append("| " + " | ".join(cells) + " |")
+            if i == 0:
+                lines.append("| " + " | ".join(["---"] * max_cols) + " |")
+        return "\n".join(lines)
+
+    return table_re.sub(_convert, md_text)
+
+
+# ─── Password / Scanned PDF Detection ────────────────────────
+
+def _try_decrypt_pdf(file_path: str) -> str:
+    """Decrypt owner-protected PDFs. Raises ValueError for user-password PDFs."""
+    try:
+        import pikepdf
+    except ImportError:
+        return file_path
+    try:
+        pdf = pikepdf.open(file_path, password="")
+        decrypted = file_path + ".decrypted.pdf"
+        pdf.save(decrypted)
+        pdf.close()
+        return decrypted
+    except Exception:
+        return file_path
+
+
+def _is_scanned_pdf(file_path: str, sample_pages: int = 3) -> bool:
+    """Heuristic: pages with <30 chars text but images → scanned."""
+    import fitz
+    doc = fitz.open(file_path)
+    pages = min(len(doc), sample_pages)
+    scanned = 0
+    for i in range(pages):
+        page = doc[i]
+        text = page.get_text("text").strip()
+        images = page.get_images(full=True)
+        if len(text) < 30 and len(images) > 0:
+            scanned += 1
+    doc.close()
+    return scanned >= max(1, pages * 0.6)
 
 
 def _fitz_table_for_page(page) -> str:
@@ -51,27 +156,52 @@ def _extract_pdf(file_path: str, embed_images: bool = False) -> str:
     import pymupdf4llm
     import fitz
 
-    md_pages = pymupdf4llm.to_markdown(file_path, page_chunks=True,
-                                        embed_images=embed_images)
+    usable = _try_decrypt_pdf(file_path)
+    try:
+        if _is_scanned_pdf(usable):
+            logger.warning("Scanned PDF detected — text extraction may be incomplete.")
 
-    doc = fitz.open(file_path)
-    parts = []
-    for idx, chunk in enumerate(md_pages):
-        page_text = chunk["text"].strip()
-        meta = chunk.get("metadata", {})
-        page_num = meta.get("page", meta.get("page_number", idx + 1))
-        page_idx = page_num - 1 if page_num >= 1 else page_num
-        if len(page_text) <= 10 and 0 <= page_idx < len(doc):
-            table_md = _fitz_table_for_page(doc[page_idx])
-            if table_md:
-                parts.append(table_md)
-                continue
-        parts.append(chunk["text"])
-    doc.close()
-    return "\n\n".join(parts)
+        md_pages = pymupdf4llm.to_markdown(usable, page_chunks=True,
+                                            embed_images=embed_images)
+        doc = fitz.open(usable)
+        parts = []
+        for idx, chunk in enumerate(md_pages):
+            page_text = chunk["text"].strip()
+            meta = chunk.get("metadata", {})
+            page_num = meta.get("page", meta.get("page_number", idx + 1))
+            page_idx = page_num - 1 if page_num >= 1 else page_num
+            if len(page_text) <= 10 and 0 <= page_idx < len(doc):
+                table_md = _fitz_table_for_page(doc[page_idx])
+                if table_md:
+                    parts.append(table_md)
+                    continue
+            parts.append(chunk["text"])
+        doc.close()
+        return "\n\n".join(parts)
+    finally:
+        if usable != file_path and os.path.exists(usable):
+            os.unlink(usable)
 
 
 def _extract_docx(file_path: str) -> str:
+    """Extract DOCX using pypandoc (handles math, track changes, footnotes).
+    Falls back to python-docx if pypandoc is unavailable."""
+    try:
+        import pypandoc
+        md = pypandoc.convert_file(
+            file_path, "gfm",
+            extra_args=["--track-changes=accept", "--wrap=none",
+                        "--markdown-headings=atx"],
+        )
+        md = _html_tables_to_pipe(md)
+        return md
+    except Exception as e:
+        logger.warning("pypandoc failed (%s), falling back to python-docx", e)
+        return _extract_docx_legacy(file_path)
+
+
+def _extract_docx_legacy(file_path: str) -> str:
+    """Legacy DOCX extraction using python-docx (fallback)."""
     from docx import Document
     from docx.table import Table
     from docx.text.paragraph import Paragraph
@@ -95,7 +225,6 @@ def _extract_docx(file_path: str) -> str:
         elif style.startswith("List"):
             parts.append(f"- {text}")
         else:
-            # Auto-detect numbered section headings in plain text
             m = re.match(r"^(\d+(?:\.\d+){2,})\s*\.?\s+(.+)", text)
             if m:
                 depth = m.group(1).count(".")
@@ -105,23 +234,18 @@ def _extract_docx(file_path: str) -> str:
                 parts.append(text)
 
     def _sanitize_cell(text):
-        """Replace newlines and pipes in cell text to preserve pipe-table format."""
         text = text.strip()
-        text = text.replace("\n", "<br>")  # newlines → <br> (converted back by _clean_cell)
-        text = text.replace("|", "∣")      # avoid breaking pipe delimiters
+        text = text.replace("\n", "<br>")
+        text = text.replace("|", "∣")
         return text
 
     def _process_table(table):
         if not table.rows:
             return
-
         def _is_merged_row(row):
-            """Detect merged rows where all non-empty cells contain identical text."""
             texts = [cell.text.strip() for cell in row.cells]
             unique = set(t for t in texts if t)
             return len(unique) == 1 and unique
-
-        # Find the real header row (skip leading merged section headers)
         header_idx = 0
         for idx, row in enumerate(table.rows):
             if _is_merged_row(row):
@@ -131,10 +255,8 @@ def _extract_docx(file_path: str) -> str:
                 header_idx = idx + 1
             else:
                 break
-
         if header_idx >= len(table.rows):
             return
-
         headers = [_sanitize_cell(cell.text) for cell in table.rows[header_idx].cells]
         parts.append("")
         parts.append("| " + " | ".join(headers) + " |")
@@ -152,7 +274,6 @@ def _extract_docx(file_path: str) -> str:
             parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
-    # Iterate body elements in document order so tables appear inline
     for element in doc.element.body:
         if element.tag == qn("w:p"):
             _process_paragraph(Paragraph(element, doc))
@@ -163,6 +284,20 @@ def _extract_docx(file_path: str) -> str:
 
 
 def _extract_pptx(file_path: str) -> str:
+    """Extract PPTX using MarkItDown (speaker notes, charts, grouped shapes).
+    Falls back to python-pptx if MarkItDown is unavailable."""
+    try:
+        from markitdown import MarkItDown
+        mid = MarkItDown()
+        result = mid.convert(file_path)
+        return result.text_content
+    except Exception as e:
+        logger.warning("MarkItDown failed (%s), falling back to python-pptx", e)
+        return _extract_pptx_legacy(file_path)
+
+
+def _extract_pptx_legacy(file_path: str) -> str:
+    """Legacy PPTX extraction using python-pptx (fallback)."""
     from pptx import Presentation
     prs = Presentation(file_path)
     parts = []
@@ -178,8 +313,7 @@ def _extract_pptx(file_path: str) -> str:
                 table = shape.table
 
                 def _pptx_sanitize(text):
-                    text = text.strip().replace("\n", "<br>").replace("|", "∣")
-                    return text
+                    return text.strip().replace("\n", "<br>").replace("|", "∣")
 
                 headers = [_pptx_sanitize(cell.text) for cell in table.rows[0].cells]
                 parts.append("")
