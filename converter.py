@@ -56,11 +56,13 @@ def _extract_pdf(file_path: str, embed_images: bool = False) -> str:
 
     doc = fitz.open(file_path)
     parts = []
-    for chunk in md_pages:
+    for idx, chunk in enumerate(md_pages):
         page_text = chunk["text"].strip()
-        page_num = chunk["metadata"]["page"]
-        if len(page_text) <= 10 and page_num < len(doc):
-            table_md = _fitz_table_for_page(doc[page_num])
+        meta = chunk.get("metadata", {})
+        page_num = meta.get("page", meta.get("page_number", idx + 1))
+        page_idx = page_num - 1 if page_num >= 1 else page_num
+        if len(page_text) <= 10 and 0 <= page_idx < len(doc):
+            table_md = _fitz_table_for_page(doc[page_idx])
             if table_md:
                 parts.append(table_md)
                 continue
