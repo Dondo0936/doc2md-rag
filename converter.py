@@ -140,12 +140,48 @@ def _extract_markdown(file_path: str, llm_client=None) -> str:
 
 
 def _clean_cell(text: str) -> str:
-    """Clean a table cell: convert <br> to newlines, strip markdown artifacts."""
-    text = re.sub(r"<br\s*/?>", "\n", text)  # <br> → newline
+    """Clean a table cell: convert <br> to newlines, strip markdown artifacts.
+
+    Rejoins word-wrap fragments from narrow PDF columns while preserving
+    genuine line breaks (bullets, sentence boundaries).
+    """
     text = re.sub(r"\u200b", "", text)        # zero-width space
     text = text.strip()
+    text = re.sub(r"<br\s*/?>", "\n", text)   # <br> → newline
     # Convert bullet markers to plain dashes
     text = re.sub(r"^[●○]\s*", "- ", text, flags=re.MULTILINE)
+    # Rejoin lines that are just word-wrap artifacts from narrow PDF columns
+    lines = text.split("\n")
+    if len(lines) > 1:
+        merged = [lines[0]]
+        for line in lines[1:]:
+            stripped = line.strip()
+            if not stripped:
+                merged.append("")
+                continue
+            # Keep as new line if it starts with a bullet/list marker
+            if re.match(r"^[-●○*■□▪▸►•]\s", stripped) or re.match(r"^\d+[.)]\s", stripped):
+                merged.append(stripped)
+                continue
+            prev = merged[-1].rstrip() if merged else ""
+            # Join if previous line doesn't end with sentence punctuation
+            if prev and not prev.endswith((".", ":", "!", "?", ";")) and not prev.endswith("  "):
+                # Detect mid-word/identifier breaks: both fragments have no spaces
+                # and at least one contains identifier chars like _ or .
+                # (e.g. "GREATE"+"R_THAN" → "GREATER_THAN", "POLI"+"CY.data" → "POLICY.data")
+                prev_token = prev.split("\n")[-1].strip()
+                prev_is_token = " " not in prev_token
+                cur_is_token = " " not in stripped
+                has_id_char = ("_" in prev_token or "_" in stripped
+                               or "." in prev_token or "." in stripped)
+                if (prev_is_token and cur_is_token and has_id_char
+                        and prev[-1].isalnum() and stripped[0].isalnum()):
+                    merged[-1] = prev + stripped
+                else:
+                    merged[-1] = prev + " " + stripped
+            else:
+                merged.append(stripped)
+        text = "\n".join(merged)
     return text
 
 
@@ -244,10 +280,37 @@ def _table_to_list(lines: list[str]) -> str:
         max_cols = max(len(r) for r in data_rows) if data_rows else 1
         headers = [f"Col {i+1}" for i in range(max_cols)]
 
+    # Merge continuation rows: if a row has empty first cell, append its
+    # content to the previous row's cells (common in PDF tables with merged cells)
+    merged_rows = []
+    for row in data_rows:
+        first_cell = row[0].strip() if row else ""
+        if not first_cell and merged_rows:
+            # Continuation of previous row — merge cell contents
+            prev = merged_rows[-1]
+            for j in range(len(row)):
+                val = row[j].strip() if j < len(row) else ""
+                if not val:
+                    continue
+                if j < len(prev) and prev[j].strip():
+                    prev[j] = prev[j].rstrip() + " " + val
+                elif j < len(prev):
+                    prev[j] = val
+                else:
+                    prev.extend([""] * (j - len(prev) + 1))
+                    prev[j] = val
+        else:
+            merged_rows.append(list(row))
+    data_rows = merged_rows
+
     result_lines = []
     for i, row in enumerate(data_rows):
-        # Use first cell as row label if it has content
-        label = row[0].split("\n")[0].strip() if row and row[0].strip() else f"Row {i+1}"
+        # Use first cell as label; if empty, try second cell; last resort "Row N"
+        label = row[0].split("\n")[0].strip() if row and row[0].strip() else ""
+        if not label and len(row) > 1 and row[1].strip():
+            label = row[1].split("\n")[0].strip()[:80]
+        if not label:
+            label = f"Row {i+1}"
         result_lines.append(f"- **{label}**:")
         for j, header in enumerate(headers):
             value = row[j] if j < len(row) else ""
@@ -258,6 +321,14 @@ def _table_to_list(lines: list[str]) -> str:
                 # Still emit remaining lines if multi-line
                 extra_lines = value.split("\n")[1:]
                 extra_lines = [vl.strip() for vl in extra_lines if vl.strip()]
+                if extra_lines:
+                    result_lines.append(f"  - {header}:")
+                    for vl in extra_lines:
+                        result_lines.append(f"    - {vl}")
+                continue
+            # If label came from this column (j==1 fallback), skip repeating it
+            if j == 1 and not row[0].strip() and value.split("\n")[0].strip()[:80] == label:
+                extra_lines = [vl.strip() for vl in value.split("\n")[1:] if vl.strip()]
                 if extra_lines:
                     result_lines.append(f"  - {header}:")
                     for vl in extra_lines:
@@ -415,9 +486,19 @@ def _handle_images(markdown: str, llm_client=None) -> tuple:
         # Fallback to alt text or generic placeholder
         if alt_text:
             return f"[Image: {alt_text}]"
-        return "[Image: visual content present in original document]"
+        return "[Image: visual content]"
 
     transformed = img_pattern.sub(_replace_img, markdown)
+
+    # pymupdf4llm placeholders: **==> picture [WxH] intentionally omitted <==**
+    pymupdf_pattern = re.compile(r"\*?\*?=+>.*?picture\s*\[.*?\].*?omitted.*?<==\*?\*?")
+
+    def _replace_pymupdf(match):
+        nonlocal images_found
+        images_found += 1
+        return "[Image: visual content]"
+
+    transformed = pymupdf_pattern.sub(_replace_pymupdf, transformed)
     return transformed, images_found
 
 

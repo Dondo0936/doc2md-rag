@@ -29,9 +29,13 @@ from tests.conftest import (
 
 class TestCleanCell:
     def test_br_tags(self):
-        assert "\n" in _clean_cell("line1<br>line2")
-        assert "\n" in _clean_cell("line1<br/>line2")
-        assert "\n" in _clean_cell("line1<br />line2")
+        # Simple fragments without sentence-ending punctuation get joined
+        assert _clean_cell("line1<br>line2") == "line1 line2"
+        assert _clean_cell("line1<br/>line2") == "line1 line2"
+        # Fragments after sentence-ending punctuation stay on new lines
+        assert "\n" in _clean_cell("line1.<br>line2")
+        # Bullet markers stay on new lines
+        assert "\n" in _clean_cell("text<br>- item")
 
     def test_zero_width_space(self):
         assert "\u200b" not in _clean_cell("hello\u200bworld")
