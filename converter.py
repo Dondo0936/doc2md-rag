@@ -44,7 +44,14 @@ def _extract_docx(file_path: str) -> str:
         elif style.startswith("List"):
             parts.append(f"- {text}")
         else:
-            parts.append(text)
+            # Auto-detect numbered section headings in plain text
+            m = re.match(r"^(\d+(?:\.\d+){2,})\s*\.?\s+(.+)", text)
+            if m:
+                depth = m.group(1).count(".")
+                level = min(depth + 1, 6)
+                parts.append(f"{'#' * level} {text}")
+            else:
+                parts.append(text)
 
     def _sanitize_cell(text):
         """Replace newlines and pipes in cell text to preserve pipe-table format."""
@@ -308,9 +315,6 @@ def _table_to_list(lines: list[str]) -> str:
         data_rows.append(_parse_pipe_row(line))
 
     if not data_rows:
-        # Header-only table or empty — return just the header names as a note
-        if headers:
-            return "- " + ", ".join(h for h in headers if h) + "\n"
         return ""
 
     # Determine real column names
@@ -360,7 +364,7 @@ def _table_to_list(lines: list[str]) -> str:
         result_lines.append(f"- **{label}**:")
         for j, header in enumerate(headers):
             value = row[j] if j < len(row) else ""
-            if not value:
+            if not value or not header.strip():
                 continue
             # Skip only if value is identical to label (avoid repeating the row header)
             if j == 0 and value.split("\n")[0].strip() == label:
@@ -574,6 +578,8 @@ def process_document(file_path: str, llm_client=None) -> dict:
     final_markdown, images_found = _handle_images(tables_converted, llm_client=llm_client)
     # Strip stray DOCX tab/sheet names (e.g. "Thẻ 1", "Thẻ 2")
     final_markdown = re.sub(r"^\s*Thẻ\s+\d+\s*$", "", final_markdown, flags=re.MULTILINE)
+    # Collapse 3+ consecutive blank lines to 2
+    final_markdown = re.sub(r"\n{4,}", "\n\n\n", final_markdown)
 
     return {
         "raw_markdown": raw_markdown,
