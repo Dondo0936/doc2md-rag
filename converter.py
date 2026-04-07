@@ -30,46 +30,55 @@ def _get_docling_converter(ocr: bool = False, describe_images: bool = False):
     if key in _docling_converters:
         return _docling_converters[key]
 
-    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.document_converter import (
+        DocumentConverter, PdfFormatOption, WordFormatOption, PowerpointFormatOption,
+    )
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import (
         PdfPipelineOptions,
+        ConvertPipelineOptions,
         TableStructureOptions,
         TableFormerMode,
     )
 
-    pipeline_options = PdfPipelineOptions()
-    pipeline_options.do_table_structure = True
-    pipeline_options.table_structure_options = TableStructureOptions(
+    # --- PDF pipeline ---
+    pdf_options = PdfPipelineOptions()
+    pdf_options.do_table_structure = True
+    pdf_options.table_structure_options = TableStructureOptions(
         mode=TableFormerMode.ACCURATE,
         do_cell_matching=True,
     )
 
-    # Image description via SmolVLM (local, ~256M params, ~0.5-1GB RAM)
     if describe_images:
-        pipeline_options.generate_picture_images = True
-        pipeline_options.do_picture_description = True
-        logger.info("Image descriptions enabled via SmolVLM")
+        pdf_options.generate_picture_images = True
+        pdf_options.do_picture_description = True
+        logger.info("PDF image descriptions enabled via SmolVLM")
     else:
-        pipeline_options.generate_picture_images = False
+        pdf_options.generate_picture_images = False
 
-    # OCR via RapidOCR
     if ocr:
-        pipeline_options.do_ocr = True
+        pdf_options.do_ocr = True
         try:
             from docling.datamodel.pipeline_options import RapidOcrOptions
-            pipeline_options.ocr_options = RapidOcrOptions()
+            pdf_options.ocr_options = RapidOcrOptions()
             logger.info("RapidOCR enabled for scanned PDF processing")
         except ImportError:
             logger.warning("RapidOcrOptions not available; using Docling default OCR")
     else:
-        pipeline_options.do_ocr = False
+        pdf_options.do_ocr = False
 
-    converter = DocumentConverter(
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-        }
-    )
+    format_options = {
+        InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options),
+    }
+
+    # --- DOCX / PPTX pipeline (image descriptions via SmolVLM) ---
+    if describe_images:
+        doc_options = ConvertPipelineOptions(do_picture_description=True)
+        format_options[InputFormat.DOCX] = WordFormatOption(pipeline_options=doc_options)
+        format_options[InputFormat.PPTX] = PowerpointFormatOption(pipeline_options=doc_options)
+        logger.info("DOCX/PPTX image descriptions enabled via SmolVLM")
+
+    converter = DocumentConverter(format_options=format_options)
     _docling_converters[key] = converter
     return converter
 
@@ -92,6 +101,12 @@ def _extract_with_docling(file_path: str, ocr: bool = False, describe_images: bo
     md = result.document.export_to_markdown()
     if not md or len(md.strip()) < 10:
         raise RuntimeError("Docling produced empty/minimal output")
+
+    # When image descriptions are enabled, Docling still emits residual
+    # <!-- image --> placeholders after the description text — strip them.
+    if describe_images:
+        md = re.sub(r"\n*<!-- image -->\n*", "\n\n", md)
+
     return md
 
 
@@ -528,7 +543,7 @@ def _extract_markdown(file_path: str, llm_client=None) -> str:
             logger.debug("Scanned PDF check failed: %s", e)
 
     # Enable image descriptions for PDFs (SmolVLM — free, local)
-    describe_imgs = ext == ".pdf"
+    describe_imgs = ext in (".pdf", ".docx", ".pptx")
 
     # Try Docling first for PDF, DOCX, PPTX
     try:
