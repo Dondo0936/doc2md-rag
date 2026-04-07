@@ -14,13 +14,21 @@ logger = logging.getLogger(__name__)
 
 # ─── Docling (Primary Backend) ──────────────────────────────────
 
-_docling_converter = None  # lazy singleton
+_docling_converter = None      # lazy singleton (no OCR — fast)
+_docling_ocr_converter = None  # lazy singleton (with RapidOCR — for scanned PDFs)
 
 
-def _get_docling_converter():
-    """Lazy-init a Docling DocumentConverter singleton."""
-    global _docling_converter
-    if _docling_converter is not None:
+def _get_docling_converter(ocr: bool = False):
+    """Lazy-init a Docling DocumentConverter singleton.
+
+    Args:
+        ocr: If True, return the OCR-enabled converter for scanned PDFs.
+    """
+    global _docling_converter, _docling_ocr_converter
+
+    if ocr and _docling_ocr_converter is not None:
+        return _docling_ocr_converter
+    if not ocr and _docling_converter is not None:
         return _docling_converter
 
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -37,20 +45,39 @@ def _get_docling_converter():
         mode=TableFormerMode.ACCURATE,
         do_cell_matching=True,
     )
-    pipeline_options.do_ocr = False  # keep fast; scanned PDFs still get warning
     pipeline_options.generate_picture_images = False  # text-only output
 
-    _docling_converter = DocumentConverter(
+    if ocr:
+        pipeline_options.do_ocr = True
+        try:
+            from docling.datamodel.pipeline_options import RapidOcrOptions
+            pipeline_options.ocr_options = RapidOcrOptions()
+            logger.info("RapidOCR enabled for scanned PDF processing")
+        except ImportError:
+            logger.warning("RapidOcrOptions not available; using Docling default OCR")
+    else:
+        pipeline_options.do_ocr = False
+
+    converter = DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
         }
     )
-    return _docling_converter
+
+    if ocr:
+        _docling_ocr_converter = converter
+    else:
+        _docling_converter = converter
+    return converter
 
 
-def _extract_with_docling(file_path: str) -> str:
-    """Extract any supported format using Docling. Returns markdown string."""
-    converter = _get_docling_converter()
+def _extract_with_docling(file_path: str, ocr: bool = False) -> str:
+    """Extract any supported format using Docling. Returns markdown string.
+
+    Args:
+        ocr: If True, use the OCR-enabled converter (for scanned PDFs).
+    """
+    converter = _get_docling_converter(ocr=ocr)
     result = converter.convert(file_path, raises_on_error=False)
 
     from docling.datamodel.document import ConversionStatus
@@ -62,6 +89,16 @@ def _extract_with_docling(file_path: str) -> str:
     if not md or len(md.strip()) < 10:
         raise RuntimeError("Docling produced empty/minimal output")
     return md
+
+
+def warmup_converter():
+    """Pre-initialize the default (non-OCR) Docling converter.
+
+    Call this at app startup to avoid cold-start delay on first upload.
+    Returns the converter instance (useful for @st.cache_resource).
+    """
+    return _get_docling_converter(ocr=False)
+
 
 MAX_FILE_SIZE_MB = 100
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -139,8 +176,49 @@ def _html_tables_to_pipe(md_text: str) -> str:
 
 # ─── Password / Scanned PDF Detection ────────────────────────
 
+def check_pdf_encrypted(file_path: str) -> dict:
+    """Check if a PDF is password-protected.
+
+    Returns:
+        {"encrypted": False} — not encrypted or only owner-password (can open freely)
+        {"encrypted": True}  — needs a user password to open
+    """
+    try:
+        import pikepdf
+    except ImportError:
+        return {"encrypted": False}
+
+    try:
+        pdf = pikepdf.open(file_path, password="")
+        pdf.close()
+        return {"encrypted": False}
+    except pikepdf.PasswordError:
+        return {"encrypted": True}
+    except Exception:
+        return {"encrypted": False}
+
+
+def decrypt_pdf(file_path: str, password: str) -> str:
+    """Decrypt a password-protected PDF with the given password.
+
+    Returns path to a decrypted temporary file.
+    Raises ValueError if the password is wrong.
+    """
+    import pikepdf
+
+    try:
+        pdf = pikepdf.open(file_path, password=password)
+    except pikepdf.PasswordError:
+        raise ValueError("Incorrect password")
+
+    decrypted = file_path + ".decrypted.pdf"
+    pdf.save(decrypted)
+    pdf.close()
+    return decrypted
+
+
 def _try_decrypt_pdf(file_path: str) -> str:
-    """Decrypt owner-protected PDFs. Raises ValueError for user-password PDFs."""
+    """Decrypt owner-protected PDFs (no user password needed)."""
     try:
         import pikepdf
     except ImportError:
@@ -356,10 +434,14 @@ def _extract_pptx_legacy(file_path: str) -> str:
     for i, slide in enumerate(prs.slides, 1):
         parts.append(f"## Slide {i}")
         for shape in slide.shapes:
-            # Handle embedded images
+            # Handle embedded images (guard against linked images without blob)
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                name = shape.name or "visual content"
-                parts.append(f"[Image: {name}]")
+                try:
+                    _ = shape.image  # test access — linked images raise ValueError
+                    name = shape.name or "visual content"
+                    parts.append(f"[Image: {name}]")
+                except (ValueError, AttributeError):
+                    parts.append("[Image: linked image not available]")
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
                     # \x0b = vertical tab = soft line break in PPTX
@@ -431,12 +513,22 @@ def _extract_markdown(file_path: str, llm_client=None) -> str:
     if ext not in (".pdf", ".docx", ".pptx"):
         raise ValueError(f"Unsupported file type: {ext}")
 
+    # Detect scanned PDFs for OCR routing
+    use_ocr = False
+    if ext == ".pdf":
+        try:
+            use_ocr = _is_scanned_pdf(file_path)
+            if use_ocr:
+                logger.info("Scanned PDF detected — enabling OCR via RapidOCR")
+        except Exception as e:
+            logger.debug("Scanned PDF check failed: %s", e)
+
     # Try Docling first for PDF, DOCX, PPTX
     try:
-        md = _extract_with_docling(file_path)
+        md = _extract_with_docling(file_path, ocr=use_ocr)
         md = _collapse_spaced_caps(md)
         md = _strip_page_numbers(md)
-        logger.info("Docling extraction succeeded for %s", ext)
+        logger.info("Docling extraction succeeded for %s%s", ext, " (with OCR)" if use_ocr else "")
         return md
     except Exception as e:
         logger.warning("Docling failed (%s), falling back to legacy backend", e)

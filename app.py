@@ -4,6 +4,7 @@
 import html
 import logging
 import os
+import re
 import sys
 import hashlib
 import tempfile
@@ -27,7 +28,7 @@ from config import (
     DEFAULT_VECTOR_WEIGHT, DEFAULT_TOP_K, DEFAULT_EMBEDDING_MODEL,
     DEFAULT_SCORE_THRESHOLD, DEFAULT_NUM_CANDIDATES, INDEXING_EXPLAINERS, EVAL_METRICS,
 )
-from converter import process_document
+from converter import process_document, check_pdf_encrypted, decrypt_pdf, warmup_converter
 from claude_wrapper import get_llm_client
 from rag_engine import RAGEngine
 from tracer import (
@@ -38,6 +39,16 @@ from tracer import (
 st.set_page_config(page_title="Doc2MD-RAG", layout="wide", page_icon="📄")
 
 MAX_FILE_SIZE_MB = 100
+
+# ─── Eager Model Loading ──────────────────────────────────────
+
+
+@st.cache_resource(show_spinner="Loading document models (first time ~30-60s)...")
+def _init_converter():
+    return warmup_converter()
+
+
+_init_converter()  # pre-load on app boot
 
 # ─── Editorial CSS ──────────────────────────────────────────────
 
@@ -119,8 +130,39 @@ div[data-testid="stTextInput"] input::placeholder { color:#6B7280 !important; fo
 
 .sidebar-section { margin:0.5rem 0; padding:0.25rem 0; }
 .sidebar-divider { border:none; border-top:1px solid #E5E7EB; margin:1rem 0; }
+
+.donate-footer { text-align:center; padding:1rem 0 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _sanitize_html(rendered_html: str) -> str:
+    """Strip dangerous URL protocols (javascript:, vbscript:, data:) from rendered HTML."""
+    return re.sub(
+        r'(<a\s[^>]*href\s*=\s*["\'])(?:javascript|vbscript|data):[^"\']*(["\'])',
+        r'\1#\2',
+        rendered_html,
+        flags=re.IGNORECASE,
+    )
+
+
+# ─── Donate Dialog ────────────────────────────────────────────
+
+@st.dialog("Support Doc2MD-RAG")
+def _donate_dialog():
+    st.markdown("If this tool saved you time, consider buying me a coffee!")
+
+    st.markdown("**PayPal**")
+    st.code("https://www.paypal.com/paypalme/family1st0211", language=None)
+    st.link_button("Open PayPal", "https://www.paypal.com/paypalme/family1st0211", use_container_width=True)
+
+    st.markdown("**BSC (BNB / BEP-20)**")
+    st.code("0x18e91ba2a5db475cc54ffccedfa3be29d4c38c1e", language=None)
+
+    st.markdown("**USDT (TRC-20)**")
+    st.code("TN74sCGz8ZESCd2HLYigLXxgYqhj4z3tfj", language=None)
+
+    st.caption("Thank you! Every bit helps keep this project alive.")
 
 
 # ─── Helper: Pipeline Progress ──────────────────────────────────
@@ -140,6 +182,7 @@ def render_pipeline(stages):
 defaults = {
     "rag_engine": None, "conversion_result": None, "indexed_params": None,
     "pipeline_log": [], "file_hash": None, "pipeline_stage": 0,
+    "pdf_password": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -305,8 +348,32 @@ with col_search:
 
 current_params = (chunk_method, chunk_size, chunk_overlap, semantic_threshold, emb_model, _emb_provider, bool(_emb_api_key), bool(st.session_state.get("_api_key")))
 
+# ── Password dialog for encrypted PDFs
+@st.dialog("Password Required")
+def _password_dialog():
+    st.markdown("This PDF is password-protected. Enter the password to unlock it.")
+    pwd = st.text_input("Password", type="password", key="_pdf_pwd_input")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Unlock", type="primary", use_container_width=True):
+            if not pwd:
+                st.error("Please enter a password.")
+            else:
+                st.session_state.pdf_password = pwd
+                st.rerun()
+    with col2:
+        if st.button("Cancel", use_container_width=True):
+            st.session_state.pop("_awaiting_password", None)
+            st.rerun()
+
+
 if uploaded is not None:
     file_bytes = uploaded.getvalue()
+
+    if len(file_bytes) == 0:
+        st.error("File is empty.")
+        st.stop()
+
     file_size_mb = len(file_bytes) / (1024 * 1024)
     if file_size_mb > MAX_FILE_SIZE_MB:
         st.error(f"File too large ({file_size_mb:.1f}MB). Maximum is {MAX_FILE_SIZE_MB}MB.")
@@ -317,17 +384,52 @@ if uploaded is not None:
     params_changed = st.session_state.indexed_params != current_params
 
     if file_changed or params_changed or st.session_state.rag_engine is None:
+        suffix = os.path.splitext(uploaded.name)[1]
+
+        # Check for encrypted PDF before processing
+        if suffix.lower() == ".pdf":
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(file_bytes)
+                check_path = tmp.name
+            try:
+                enc = check_pdf_encrypted(check_path)
+            except Exception as e:
+                logger.warning("Encryption check failed: %s", e)
+                enc = {"encrypted": False}
+            finally:
+                if os.path.exists(check_path):
+                    os.unlink(check_path)
+
+            if enc["encrypted"] and st.session_state.pdf_password is None:
+                st.session_state["_awaiting_password"] = True
+                _password_dialog()
+                st.stop()
+
         st.session_state.pipeline_stage = 1
         with st.spinner("Converting and indexing..."):
             log = []
-            suffix = os.path.splitext(uploaded.name)[1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(file_bytes)
                 tmp_path = tmp.name
+            decrypted_path = None
             try:
                 st.session_state.pipeline_stage = 2
+
+                # If we have a password, decrypt first
+                convert_path = tmp_path
+                if suffix.lower() == ".pdf" and st.session_state.pdf_password is not None:
+                    try:
+                        decrypted_path = decrypt_pdf(tmp_path, st.session_state.pdf_password)
+                        convert_path = decrypted_path
+                    except ValueError:
+                        st.session_state.pdf_password = None
+                        st.error("Incorrect password. Please try again.")
+                        st.stop()
+                    finally:
+                        st.session_state.pdf_password = None
+
                 llm_client = get_llm_client(api_key=st.session_state.get("_api_key"))
-                result = process_document(tmp_path, llm_client=llm_client)
+                result = process_document(convert_path, llm_client=llm_client)
                 st.session_state.conversion_result = result
                 stats = result["stats"]
                 log.append(f"**Extracted** markdown ({stats['char_count']:,} chars)")
@@ -358,6 +460,8 @@ if uploaded is not None:
             finally:
                 if os.path.exists(tmp_path):
                     os.unlink(tmp_path)
+                if decrypted_path and os.path.exists(decrypted_path):
+                    os.unlink(decrypted_path)
         st.rerun()
 
 
@@ -426,9 +530,9 @@ if st.session_state.conversion_result is not None:
             is_match = cid in matched_ids
             bg = MATCH_COLOR if is_match else CHUNK_COLORS[cid % 2]
             border_color = MATCH_BORDER if is_match else CHUNK_BORDER
-            # Sanitize: escape HTML in chunk text, then render markdown
+            # Sanitize: escape HTML in chunk text, render markdown, strip dangerous URLs
             safe_text = html.escape(chunk["text"])
-            chunk_html = md_lib.markdown(safe_text)
+            chunk_html = _sanitize_html(md_lib.markdown(safe_text))
             overlap_style = "border-top:2px dashed #D1D5DB;" if show_overlap_zones and i > 0 else ""
 
             html_parts.append(f'<div class="chunk-block" id="chunk-{cid}" style="background:{bg};border-left-color:{border_color};{overlap_style}"><span class="chunk-id">#{cid}</span>{chunk_html}</div>')
@@ -833,3 +937,12 @@ if st.session_state.conversion_result is not None:
 
 else:
     st.markdown('<div class="empty-state"><h2>Drop a document to begin</h2><p>Upload a PDF, PPTX, DOCX, or CSV. It will be converted to clean markdown (tables become lists, images become descriptions), then chunked and indexed for hybrid BM25 + vector search.</p><p style="margin-top:1rem;font-size:0.8rem;color:#D1D5DB;">Supports files up to 100MB</p></div>', unsafe_allow_html=True)
+
+# ─── Donate Button (always visible) ──────────────────────────
+
+st.markdown('<div class="donate-footer">', unsafe_allow_html=True)
+col_a, col_btn, col_b = st.columns([1, 1, 1])
+with col_btn:
+    if st.button("☕ Buy me a coffee", use_container_width=True):
+        _donate_dialog()
+st.markdown('</div>', unsafe_allow_html=True)
