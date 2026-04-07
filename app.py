@@ -131,7 +131,25 @@ div[data-testid="stTextInput"] input::placeholder { color:#6B7280 !important; fo
 .sidebar-section { margin:0.5rem 0; padding:0.25rem 0; }
 .sidebar-divider { border:none; border-top:1px solid #E5E7EB; margin:1rem 0; }
 
-.donate-footer { text-align:center; padding:1rem 0 0.5rem; }
+/* Donate — fixed top-right */
+.donate-fixed {
+    position:fixed; top:12px; right:16px; z-index:9999;
+}
+.donate-fixed button {
+    background:#fff !important; border:1px solid #E5E7EB !important;
+    border-radius:8px !important; padding:0.3rem 0.7rem !important;
+    font-size:0.75rem !important; font-weight:500 !important;
+    color:#6B7280 !important; cursor:pointer !important;
+    box-shadow:0 1px 3px rgba(0,0,0,0.06) !important;
+    transition:all 0.15s ease !important; line-height:1.3 !important;
+    min-height:0 !important; height:auto !important;
+}
+.donate-fixed button:hover {
+    border-color:#F59E0B !important; color:#D97706 !important;
+    box-shadow:0 2px 6px rgba(245,158,11,0.15) !important;
+}
+.donate-fixed div[data-testid="stButton"] { margin:0 !important; padding:0 !important; }
+.donate-fixed div[data-testid="stButton"] > button { width:auto !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -163,6 +181,13 @@ def _donate_dialog():
     st.code("TN74sCGz8ZESCd2HLYigLXxgYqhj4z3tfj", language=None)
 
     st.caption("Thank you! Every bit helps keep this project alive.")
+
+# ─── Donate Button (fixed top-right) ─────────────────────────
+
+st.markdown('<div class="donate-fixed">', unsafe_allow_html=True)
+if st.button("☕ Donate"):
+    _donate_dialog()
+st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ─── Helper: Pipeline Progress ──────────────────────────────────
@@ -938,11 +963,4 @@ if st.session_state.conversion_result is not None:
 else:
     st.markdown('<div class="empty-state"><h2>Drop a document to begin</h2><p>Upload a PDF, PPTX, DOCX, or CSV. It will be converted to clean markdown (tables become lists, images become descriptions), then chunked and indexed for hybrid BM25 + vector search.</p><p style="margin-top:1rem;font-size:0.8rem;color:#D1D5DB;">Supports files up to 100MB</p></div>', unsafe_allow_html=True)
 
-# ─── Donate Button (always visible) ──────────────────────────
 
-st.markdown('<div class="donate-footer">', unsafe_allow_html=True)
-col_a, col_btn, col_b = st.columns([1, 1, 1])
-with col_btn:
-    if st.button("☕ Buy me a coffee", use_container_width=True):
-        _donate_dialog()
-st.markdown('</div>', unsafe_allow_html=True)
