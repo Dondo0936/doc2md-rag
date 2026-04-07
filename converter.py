@@ -1,7 +1,7 @@
 # converter.py — Document → Markdown conversion with post-processing
 #
 # Pipeline: Extract raw markdown → Convert tables to lists → Handle image descriptions
-# Backends: pypandoc (DOCX), pymupdf4llm+fitz (PDF), markitdown/python-pptx (PPTX)
+# Backends: docling (primary) → pypandoc/pymupdf4llm/markitdown (fallback)
 
 import logging
 import re
@@ -11,6 +11,57 @@ import pandas as pd
 from html.parser import HTMLParser
 
 logger = logging.getLogger(__name__)
+
+# ─── Docling (Primary Backend) ──────────────────────────────────
+
+_docling_converter = None  # lazy singleton
+
+
+def _get_docling_converter():
+    """Lazy-init a Docling DocumentConverter singleton."""
+    global _docling_converter
+    if _docling_converter is not None:
+        return _docling_converter
+
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import (
+        PdfPipelineOptions,
+        TableStructureOptions,
+        TableFormerMode,
+    )
+
+    pipeline_options = PdfPipelineOptions()
+    pipeline_options.do_table_structure = True
+    pipeline_options.table_structure_options = TableStructureOptions(
+        mode=TableFormerMode.ACCURATE,
+        do_cell_matching=True,
+    )
+    pipeline_options.do_ocr = False  # keep fast; scanned PDFs still get warning
+    pipeline_options.generate_picture_images = False  # text-only output
+
+    _docling_converter = DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+        }
+    )
+    return _docling_converter
+
+
+def _extract_with_docling(file_path: str) -> str:
+    """Extract any supported format using Docling. Returns markdown string."""
+    converter = _get_docling_converter()
+    result = converter.convert(file_path, raises_on_error=False)
+
+    from docling.datamodel.document import ConversionStatus
+    if result.status == ConversionStatus.FAILURE:
+        errors = "; ".join(str(e) for e in (result.errors or []))
+        raise RuntimeError(f"Docling conversion failed: {errors}")
+
+    md = result.document.export_to_markdown()
+    if not md or len(md.strip()) < 10:
+        raise RuntimeError("Docling produced empty/minimal output")
+    return md
 
 MAX_FILE_SIZE_MB = 100
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -299,14 +350,20 @@ def _extract_pptx(file_path: str) -> str:
 def _extract_pptx_legacy(file_path: str) -> str:
     """Legacy PPTX extraction using python-pptx (fallback)."""
     from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
     prs = Presentation(file_path)
     parts = []
     for i, slide in enumerate(prs.slides, 1):
         parts.append(f"## Slide {i}")
         for shape in slide.shapes:
+            # Handle embedded images
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                name = shape.name or "visual content"
+                parts.append(f"[Image: {name}]")
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
-                    text = para.text.strip()
+                    # \x0b = vertical tab = soft line break in PPTX
+                    text = para.text.replace("\x0b", "\n").strip()
                     if text:
                         parts.append(text)
             if shape.has_table:
@@ -339,25 +396,62 @@ def _extract_csv(file_path: str) -> str:
     return df.to_markdown(index=False)
 
 
+def _collapse_spaced_caps(text: str) -> str:
+    """Collapse spaced-out capital headers: 'C A P I T A L' → 'CAPITAL'.
+
+    Also collapses multi-space gaps left after merging adjacent words.
+    """
+    def _collapse(m):
+        return m.group(0).replace(" ", "")
+    # Match 3+ single uppercase letters separated by single spaces
+    text = re.sub(r"\b[A-Z](?:\s[A-Z]){2,}\b", _collapse, text)
+    # Collapse runs of 2+ spaces (left between collapsed words) to single space
+    text = re.sub(r"  +", " ", text)
+    return text
+
+
+def _strip_page_numbers(text: str) -> str:
+    """Remove standalone page numbers (1-4 digit number alone between blank lines)."""
+    return re.sub(r"\n\n\s*\d{1,4}\s*\n\n", "\n\n", text)
+
+
 def _extract_markdown(file_path: str, llm_client=None) -> str:
-    """Extract markdown from PDF, DOCX, PPTX, or CSV."""
+    """Extract markdown from PDF, DOCX, PPTX, or CSV.
+
+    Uses Docling as primary backend for PDF/DOCX/PPTX, with legacy fallbacks.
+    """
     file_size = os.path.getsize(file_path)
     if file_size > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"File too large ({file_size / 1024 / 1024:.1f}MB). Maximum is {MAX_FILE_SIZE_MB}MB.")
 
     ext = os.path.splitext(file_path)[1].lower()
 
-    if ext == ".pdf":
-        # Embed images as base64 when we have an LLM client for Vision
-        return _extract_pdf(file_path, embed_images=bool(llm_client))
-    elif ext == ".docx":
-        return _extract_docx(file_path)
-    elif ext == ".pptx":
-        return _extract_pptx(file_path)
-    elif ext == ".csv":
+    if ext == ".csv":
         return _extract_csv(file_path)
-    else:
+    if ext not in (".pdf", ".docx", ".pptx"):
         raise ValueError(f"Unsupported file type: {ext}")
+
+    # Try Docling first for PDF, DOCX, PPTX
+    try:
+        md = _extract_with_docling(file_path)
+        md = _collapse_spaced_caps(md)
+        md = _strip_page_numbers(md)
+        logger.info("Docling extraction succeeded for %s", ext)
+        return md
+    except Exception as e:
+        logger.warning("Docling failed (%s), falling back to legacy backend", e)
+
+    # Legacy fallbacks
+    if ext == ".pdf":
+        md = _extract_pdf(file_path, embed_images=bool(llm_client))
+    elif ext == ".docx":
+        md = _extract_docx(file_path)
+    elif ext == ".pptx":
+        md = _extract_pptx(file_path)
+
+    md = _collapse_spaced_caps(md)
+    md = _strip_page_numbers(md)
+    return md
 
 
 def _clean_cell(text: str) -> str:
