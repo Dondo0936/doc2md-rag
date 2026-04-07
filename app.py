@@ -131,8 +131,6 @@ div[data-testid="stTextInput"] input::placeholder { color:#6B7280 !important; fo
 .sidebar-section { margin:0.5rem 0; padding:0.25rem 0; }
 .sidebar-divider { border:none; border-top:1px solid #E5E7EB; margin:1rem 0; }
 
-/* Donate — hide the real Streamlit button, show HTML overlay */
-#donate-hidden-wrap { position:absolute; overflow:hidden; width:1px; height:1px; opacity:0; pointer-events:none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -165,32 +163,49 @@ def _donate_dialog():
 
     st.caption("Thank you! Every bit helps keep this project alive.")
 
-# ─── Donate Button (fixed top-right) ─────────────────────────
+# ─── Donate Button (fixed top-right via st.html iframe) ──────
 
-# Hidden real Streamlit button (triggers the dialog)
-st.markdown('<div id="donate-hidden-wrap">', unsafe_allow_html=True)
 if st.button("☕ Donate", key="donate_btn"):
     _donate_dialog()
-st.markdown('</div>', unsafe_allow_html=True)
 
-# Pure HTML/CSS button fixed top-right — clicks the hidden Streamlit button via JS
-st.markdown("""
-<button onclick="
-  var btn = window.parent.document.querySelector('#donate-hidden-wrap button')
-         || window.parent.document.querySelector('button[kind=secondary]');
-  if(!btn){var bs=window.parent.document.querySelectorAll('button');
-    for(var i=0;i<bs.length;i++){if(bs[i].textContent.indexOf('Donate')!==-1){btn=bs[i];break;}}}
-  if(btn) btn.click();
-" style="
-  position:fixed; top:12px; right:16px; z-index:999999;
-  background:#fff; border:1px solid #E5E7EB; border-radius:8px;
-  padding:5px 12px; font-size:0.73rem; font-weight:500; font-family:Inter,sans-serif;
-  color:#6B7280; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.06);
-  transition:all 0.15s ease; line-height:1.3;
-" onmouseover="this.style.borderColor='#F59E0B';this.style.color='#D97706';this.style.boxShadow='0 2px 6px rgba(245,158,11,0.15)'"
-   onmouseout="this.style.borderColor='#E5E7EB';this.style.color='#6B7280';this.style.boxShadow='0 1px 3px rgba(0,0,0,0.06)'"
->☕ Donate</button>
-""", unsafe_allow_html=True)
+st.html("""
+<script>
+(function() {
+  var btns = window.parent.document.querySelectorAll('button');
+  for (var i = 0; i < btns.length; i++) {
+    if (btns[i].textContent.trim() === '☕ Donate') {
+      btns[i].closest('[data-testid="stButton"]').style.cssText =
+        'position:absolute;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;';
+      break;
+    }
+  }
+  if (!window.parent.document.getElementById('donate-float')) {
+    var b = window.parent.document.createElement('button');
+    b.id = 'donate-float';
+    b.textContent = '☕ Donate';
+    b.style.cssText = 'position:fixed;top:12px;right:16px;z-index:999999;background:#fff;'
+      + 'border:1px solid #E5E7EB;border-radius:8px;padding:5px 12px;font-size:0.73rem;'
+      + 'font-weight:500;font-family:Inter,sans-serif;color:#6B7280;cursor:pointer;'
+      + 'box-shadow:0 1px 3px rgba(0,0,0,0.06);transition:all 0.15s ease;line-height:1.3;';
+    b.onmouseover = function() {
+      this.style.borderColor='#F59E0B'; this.style.color='#D97706';
+      this.style.boxShadow='0 2px 6px rgba(245,158,11,0.15)';
+    };
+    b.onmouseout = function() {
+      this.style.borderColor='#E5E7EB'; this.style.color='#6B7280';
+      this.style.boxShadow='0 1px 3px rgba(0,0,0,0.06)';
+    };
+    b.onclick = function() {
+      var real = window.parent.document.querySelectorAll('button');
+      for (var j = 0; j < real.length; j++) {
+        if (real[j].textContent.trim() === '☕ Donate') { real[j].click(); break; }
+      }
+    };
+    window.parent.document.body.appendChild(b);
+  }
+})();
+</script>
+""")
 
 
 # ─── Helper: Pipeline Progress ──────────────────────────────────
