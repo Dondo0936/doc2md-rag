@@ -14,22 +14,21 @@ logger = logging.getLogger(__name__)
 
 # ─── Docling (Primary Backend) ──────────────────────────────────
 
-_docling_converter = None      # lazy singleton (no OCR — fast)
-_docling_ocr_converter = None  # lazy singleton (with RapidOCR — for scanned PDFs)
+# Lazy singletons keyed by (ocr, describe_images)
+_docling_converters: dict = {}
 
 
-def _get_docling_converter(ocr: bool = False):
+def _get_docling_converter(ocr: bool = False, describe_images: bool = False):
     """Lazy-init a Docling DocumentConverter singleton.
 
     Args:
-        ocr: If True, return the OCR-enabled converter for scanned PDFs.
+        ocr: If True, enable RapidOCR for scanned PDFs.
+        describe_images: If True, enable SmolVLM image descriptions.
     """
-    global _docling_converter, _docling_ocr_converter
-
-    if ocr and _docling_ocr_converter is not None:
-        return _docling_ocr_converter
-    if not ocr and _docling_converter is not None:
-        return _docling_converter
+    global _docling_converters
+    key = (ocr, describe_images)
+    if key in _docling_converters:
+        return _docling_converters[key]
 
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.base_models import InputFormat
@@ -45,8 +44,16 @@ def _get_docling_converter(ocr: bool = False):
         mode=TableFormerMode.ACCURATE,
         do_cell_matching=True,
     )
-    pipeline_options.generate_picture_images = False  # text-only output
 
+    # Image description via SmolVLM (local, ~256M params, ~0.5-1GB RAM)
+    if describe_images:
+        pipeline_options.generate_picture_images = True
+        pipeline_options.do_picture_description = True
+        logger.info("Image descriptions enabled via SmolVLM")
+    else:
+        pipeline_options.generate_picture_images = False
+
+    # OCR via RapidOCR
     if ocr:
         pipeline_options.do_ocr = True
         try:
@@ -63,21 +70,18 @@ def _get_docling_converter(ocr: bool = False):
             InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
         }
     )
-
-    if ocr:
-        _docling_ocr_converter = converter
-    else:
-        _docling_converter = converter
+    _docling_converters[key] = converter
     return converter
 
 
-def _extract_with_docling(file_path: str, ocr: bool = False) -> str:
+def _extract_with_docling(file_path: str, ocr: bool = False, describe_images: bool = False) -> str:
     """Extract any supported format using Docling. Returns markdown string.
 
     Args:
         ocr: If True, use the OCR-enabled converter (for scanned PDFs).
+        describe_images: If True, use the image-description converter.
     """
-    converter = _get_docling_converter(ocr=ocr)
+    converter = _get_docling_converter(ocr=ocr, describe_images=describe_images)
     result = converter.convert(file_path, raises_on_error=False)
 
     from docling.datamodel.document import ConversionStatus
@@ -523,12 +527,17 @@ def _extract_markdown(file_path: str, llm_client=None) -> str:
         except Exception as e:
             logger.debug("Scanned PDF check failed: %s", e)
 
+    # Enable image descriptions for PDFs (SmolVLM — free, local)
+    describe_imgs = ext == ".pdf"
+
     # Try Docling first for PDF, DOCX, PPTX
     try:
-        md = _extract_with_docling(file_path, ocr=use_ocr)
+        md = _extract_with_docling(file_path, ocr=use_ocr, describe_images=describe_imgs)
         md = _collapse_spaced_caps(md)
         md = _strip_page_numbers(md)
-        logger.info("Docling extraction succeeded for %s%s", ext, " (with OCR)" if use_ocr else "")
+        logger.info("Docling extraction succeeded for %s%s%s", ext,
+                     " (with OCR)" if use_ocr else "",
+                     " (with image descriptions)" if describe_imgs else "")
         return md
     except Exception as e:
         logger.warning("Docling failed (%s), falling back to legacy backend", e)

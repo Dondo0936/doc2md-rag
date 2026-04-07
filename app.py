@@ -8,6 +8,7 @@ import re
 import sys
 import hashlib
 import tempfile
+import time
 import traceback
 import streamlit as st
 import pandas as pd
@@ -39,6 +40,8 @@ from tracer import (
 st.set_page_config(page_title="Doc2MD-RAG", layout="wide", page_icon="📄")
 
 MAX_FILE_SIZE_MB = 100
+RATE_LIMIT_PER_HOUR = 10
+RATE_LIMIT_WINDOW = 3600  # seconds
 
 # ─── Eager Model Loading ──────────────────────────────────────
 
@@ -209,6 +212,22 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+if "upload_timestamps" not in st.session_state:
+    st.session_state.upload_timestamps = []
+
+
+def _check_rate_limit() -> bool:
+    """Check if the user has exceeded the upload rate limit. Returns True if allowed."""
+    now = time.time()
+    st.session_state.upload_timestamps = [
+        t for t in st.session_state.upload_timestamps if now - t < RATE_LIMIT_WINDOW
+    ]
+    return len(st.session_state.upload_timestamps) < RATE_LIMIT_PER_HOUR
+
+
+def _record_upload():
+    """Record a successful upload timestamp."""
+    st.session_state.upload_timestamps.append(time.time())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -406,6 +425,11 @@ if uploaded is not None:
     params_changed = st.session_state.indexed_params != current_params
 
     if file_changed or params_changed or st.session_state.rag_engine is None:
+        # Rate limit check
+        if not _check_rate_limit():
+            st.error(f"Rate limit reached ({RATE_LIMIT_PER_HOUR} conversions per hour). Please try again later.")
+            st.stop()
+
         suffix = os.path.splitext(uploaded.name)[1]
 
         # Check for encrypted PDF before processing
@@ -474,6 +498,7 @@ if uploaded is not None:
                 log.append(f"**Chunked** into {n_chunks} pieces ({chunk_method}, size={chunk_size})")
                 log.append(f"**Indexed** with FAISS + BM25 ({emb_model})")
                 st.session_state.pipeline_log = log
+                _record_upload()
             except Exception as e:
                 logger.error("Pipeline failed: %s", traceback.format_exc())
                 st.error(f"Processing failed: {e}")
