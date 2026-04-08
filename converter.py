@@ -543,9 +543,12 @@ def _extract_markdown(file_path: str, llm_client=None) -> str:
             logger.debug("Scanned PDF check failed: %s", e)
 
     # Enable image descriptions for PDFs (SmolVLM — free, local)
-    # Image descriptions via SmolVLM — disabled by default.
-    # SmolVLM needs ~0.5-1GB RAM which exceeds Streamlit Cloud free tier.
-    describe_imgs = False
+    # Image descriptions via SmolVLM — enabled when ENABLE_IMAGE_DESC=1.
+    # Needs ~1-2GB RAM; works on HF Spaces (16GB) but not Streamlit Cloud (1GB).
+    describe_imgs = (
+        os.environ.get("ENABLE_IMAGE_DESC", "0") == "1"
+        and ext in (".pdf", ".docx", ".pptx")
+    )
 
     # Try Docling first for PDF, DOCX, PPTX
     try:
