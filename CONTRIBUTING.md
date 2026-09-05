@@ -9,12 +9,17 @@ Thanks for your interest in contributing! Here's how to get started.
 git clone https://github.com/Dondo0936/doc2md-rag.git
 cd doc2md-rag
 
-# Install dependencies
+# Install dependencies + CLI entry points
 pip install -r requirements.txt
+pip install -e .
 pip install pytest ruff  # dev tools
 
-# Run the app
+# CLI
+doc2md-rag --help
+
+# Optional UI
 streamlit run app.py
+# or: doc2md-rag ui
 ```
 
 ## Running Tests
@@ -52,9 +57,13 @@ Open a GitHub issue with:
 
 | File | Purpose |
 |---|---|
-| `app.py` | Streamlit UI and orchestration |
-| `converter.py` | Document to markdown conversion |
+| `knowledge_base.py` | Framework API — multi-source ingest / search / persist |
+| `cli.py` | Typer CLI (`doc2md-rag`) |
+| `mcp_server.py` | MCP tools for agents |
+| `converter.py` | Multi-format document to markdown conversion |
 | `rag_engine.py` | Chunking, indexing, search, evaluation |
+| `app.py` | Optional Streamlit UI |
 | `tracer.py` | Pipeline visualization (Plotly) |
 | `claude_wrapper.py` | Anthropic API wrapper |
 | `config.py` | Constants and defaults |
+| `examples/` | Drop-in integration templates |
