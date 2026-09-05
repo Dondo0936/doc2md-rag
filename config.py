@@ -123,5 +123,12 @@ MATCH_BORDER = "#F39C12"
 CHUNK_BORDER = "#AED6F1"
 
 # ─── File Config ─────────────────────────────────────────────────
-SUPPORTED_EXTENSIONS = ["pdf", "pptx", "docx", "csv"]
+# Formats the converter / KnowledgeBase can ingest (files + URL scheme).
+SUPPORTED_EXTENSIONS = [
+    "pdf", "pptx", "docx", "csv", "xlsx", "xls",
+    "html", "htm", "txt", "md", "markdown",
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff",
+]
+SUPPORTED_URL_SCHEMES = ("http://", "https://")
+DEFAULT_KB_DIR = ".doc2md_kb"
 CLAUDE_VISION_MODEL = "claude-haiku-4-5-20251001"

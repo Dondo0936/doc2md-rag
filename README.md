@@ -1,6 +1,8 @@
 # Doc2MD-RAG
 
-Convert documents (PDF, DOCX, PPTX, CSV) to LLM-friendly markdown, then chunk, index, and search with hybrid BM25 + vector retrieval — all in one interactive Streamlit app.
+**CLI / MCP-first** document knowledge base + hybrid RAG — a framework you plug into existing apps and agents.
+
+Convert many input types (PDF, DOCX, PPTX, CSV, **XLSX**, **HTML**, **images**, **URLs**, TXT/MD) to LLM-friendly markdown, then chunk, index, and retrieve with hybrid BM25 + vector search.
 
 <p align="center">
   <img src="docs/demo.gif" alt="Doc2MD-RAG Demo" width="800" />
@@ -8,62 +10,121 @@ Convert documents (PDF, DOCX, PPTX, CSV) to LLM-friendly markdown, then chunk, i
 
 > [Watch full demo video (MP4)](docs/demo.mp4)
 
-## Features
+## Why this shape?
 
-- **Document conversion** — PDF (pymupdf4llm), DOCX (python-docx), PPTX (python-pptx), CSV (pandas). Tables are converted to nested bullet lists for better LLM chunking. Images can be described by Claude Vision.
-- **4 chunking strategies** — Recursive, By Sentence, By Markdown Headers, Semantic (embedding-based).
-- **3 search modes** — Hybrid (BM25 + Vector), Vector-only (KNN), Lexical-only (BM25).
-- **7 embedding models** — Local (SentenceTransformers) or API-based (OpenAI, Voyage AI, Google Gemini). Swap models without changing code.
-- **Tunable parameters** — Chunk size, overlap, search weights, score threshold, dedup threshold, embedding model — all with hover tooltips explaining their effect.
-- **RAG pipeline tracer** — Visualize query tokenization, embedding space (PCA/t-SNE), BM25 token matches, and score fusion breakdown.
-- **Prompt builder** — Auto-assembles retrieved chunks into a copy-paste-ready LLM prompt with token estimation.
-- **Chunk comparison** — Side-by-side comparison of different chunking strategies on the same document.
-- **Pipeline overview** — Educational tab explaining how each stage and parameter works.
+| Surface | Who it's for |
+|---|---|
+| **Python `KnowledgeBase`** | Drop into your existing backend / agent loop |
+| **CLI (`doc2md-rag`)** | Scripts, CI, local indexing |
+| **MCP server** | Cursor, Claude Desktop, any MCP agent |
+| **Streamlit UI** (optional) | Interactive exploration / demos |
 
-## Quick Start
+## Quick start
 
 ```bash
-# Clone and install
-git clone https://github.com/YOUR_USERNAME/doc2md-rag.git
+git clone https://github.com/Dondo0936/doc2md-rag.git
 cd doc2md-rag
 pip install -r requirements.txt
-
-# Run
-streamlit run app.py
+pip install -e .
 ```
 
-Open `http://localhost:8501` in your browser.
+### Library (connect to your app)
 
-### Optional: Claude Vision for image descriptions
+```python
+from knowledge_base import KnowledgeBase
+
+kb = KnowledgeBase(persist_dir="./.doc2md_kb")
+
+# Any mix of local files + URLs
+kb.ingest("./docs/handbook.pdf")
+kb.ingest("./data/sales.xlsx")
+kb.ingest("https://example.com/pricing")
+kb.ingest("./screenshots/error.png")  # vision desc if ANTHROPIC_API_KEY set
+kb.save()
+
+hits = kb.search("refund policy", top_k=5)
+prompt = kb.build_prompt("How do refunds work?")
+```
+
+### CLI
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+doc2md-rag ingest ./docs/handbook.pdf ./data/sales.xlsx https://example.com/pricing
+doc2md-rag search "refund policy" --top-k 5
+doc2md-rag search "refund policy" --prompt          # grounded LLM prompt
+doc2md-rag convert ./report.pdf -o report.md
+doc2md-rag status
+doc2md-rag list-formats
 ```
 
-Or enter your API key in the sidebar under "API Configuration". Without an API key, images will use placeholder descriptions instead.
+### MCP (for agents)
+
+```bash
+doc2md-rag mcp
+```
+
+Cursor / Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "doc2md-rag": {
+      "command": "doc2md-rag",
+      "args": ["mcp"],
+      "env": {
+        "DOC2MD_KB_DIR": "/absolute/path/to/.doc2md_kb"
+      }
+    }
+  }
+}
+```
+
+MCP tools: `kb_ingest`, `kb_ingest_many`, `kb_search`, `kb_build_prompt`, `kb_convert`, `kb_status`, `kb_list_sources`, `kb_list_formats`, `kb_ingest_markdown`, `kb_clear`.
+
+### Optional Streamlit UI
+
+```bash
+doc2md-rag ui
+# or: streamlit run app.py
+```
+
+## Supported inputs
+
+| Type | Extensions / schemes |
+|---|---|
+| Documents | `pdf`, `docx`, `pptx` |
+| Tables | `csv`, `xlsx`, `xls` |
+| Web | `html`, `htm`, `http://`, `https://` |
+| Text | `txt`, `md`, `markdown` |
+| Images | `png`, `jpg`, `jpeg`, `webp`, `gif`, `bmp`, `tiff` |
+
+Images use Claude Vision when `ANTHROPIC_API_KEY` is set; otherwise MarkItDown / placeholders.
 
 ## Architecture
 
 ```
 doc2md-rag/
-├── app.py              # Streamlit UI + orchestration
-├── converter.py        # Doc → Markdown (tables→lists, images→descriptions)
-├── rag_engine.py       # Chunking, FAISS+BM25 indexing, search, evaluation
-├── tracer.py           # Pipeline visualization (Plotly charts)
-├── claude_wrapper.py   # OpenAI-compatible wrapper for Anthropic API
-├── config.py           # Constants + parameter defaults + tooltips
-├── tests/              # Test suite
-└── requirements.txt
+├── knowledge_base.py   # Framework API (ingest / search / persist)
+├── cli.py              # Typer CLI
+├── mcp_server.py       # MCP tools for agents
+├── converter.py        # Multi-format → markdown
+├── rag_engine.py       # Chunking, FAISS+BM25, search
+├── tracer.py           # Pipeline visualization (UI)
+├── claude_wrapper.py   # Anthropic vision helper
+├── config.py           # Defaults + supported formats
+├── app.py              # Optional Streamlit UI
+└── examples/           # Drop-in integration templates
 ```
 
-## How It Works
+Pipeline: **ingest → convert → chunk → embed → index (FAISS + BM25) → search / build_prompt**.
 
-1. **Upload** — Drop a PDF, DOCX, PPTX, or CSV (up to 100MB)
-2. **Convert** — Document is parsed to markdown. Pipe-tables become nested bullet lists. Images get AI descriptions (with API key) or placeholders.
-3. **Chunk** — Markdown is split into overlapping pieces using your chosen strategy.
-4. **Embed** — Each chunk is encoded into a dense vector using your chosen model (local SentenceTransformers or API-based OpenAI/Voyage/Google).
-5. **Index** — FAISS (vector) and BM25 (keyword) indexes are built in parallel.
-6. **Search** — Your query is scored against both indexes. Scores are normalized, weighted, combined, filtered, and deduplicated.
+## Features
+
+- **Multi-source knowledge base** — accumulate documents; persist/reload embeddings
+- **4 chunking strategies** — Recursive, By Sentence, By Markdown Headers, Semantic
+- **3 search modes** — Hybrid (BM25 + Vector), Vector-only (KNN), Lexical-only (BM25)
+- **7 embedding models** — local SentenceTransformers or OpenAI / Voyage / Gemini APIs
+- **Agent surfaces** — CLI + MCP first; Streamlit optional
 
 ## Configuration
 
@@ -72,39 +133,38 @@ doc2md-rag/
 | Chunk size | 400 | Characters per chunk |
 | Overlap | 50 | Characters shared between adjacent chunks |
 | Search mode | Hybrid | BM25 + Vector, Vector-only, or BM25-only |
-| BM25 weight | 0.4 | Weight for keyword matching (Hybrid mode) |
-| Vector weight | 0.6 | Weight for semantic similarity (Hybrid mode) |
-| Top K | 5 | Number of results returned |
-| Score threshold | 0.0 | Minimum score to include a result |
-| Embedding model | all-MiniLM-L6-v2 | 384d, fast. See full list below |
+| BM25 weight | 0.4 | Keyword weight (Hybrid) |
+| Vector weight | 0.6 | Semantic weight (Hybrid) |
+| Top K | 5 | Results returned |
+| Embedding model | all-MiniLM-L6-v2 | See list below |
+| Persist dir | `.doc2md_kb` | Or `DOC2MD_KB_DIR` |
 
 ## Embedding Models
 
-| Model | Provider | Dimensions | API Key Required |
+| Model | Provider | Dimensions | API Key |
 |---|---|---|---|
-| all-MiniLM-L6-v2 | Local (SentenceTransformers) | 384 | No |
-| all-mpnet-base-v2 | Local (SentenceTransformers) | 768 | No |
+| all-MiniLM-L6-v2 | Local | 384 | — |
+| all-mpnet-base-v2 | Local | 768 | — |
 | text-embedding-3-small | OpenAI | 1536 | `OPENAI_API_KEY` |
 | text-embedding-3-large | OpenAI | 3072 | `OPENAI_API_KEY` |
-| voyage-3.5-lite | Voyage AI (Anthropic-recommended) | 1024 | `VOYAGE_API_KEY` |
-| gemini-embedding-001 | Google Gemini (multimodal) | 768 | `GEMINI_API_KEY` |
+| voyage-3.5-lite | Voyage AI | 1024 | `VOYAGE_API_KEY` |
+| gemini-embedding-001 | Google | 768 | `GEMINI_API_KEY` |
 | text-embedding-004 | Google | 768 | `GEMINI_API_KEY` |
 
-Local models run on your machine with no API key. API-based models require the corresponding key — enter it in the sidebar under "API Configuration" or set the environment variable.
-
-To install optional embedding providers:
+## Environment
 
 ```bash
-# All providers
-pip install openai voyageai google-generativeai
-
-# Or install only what you need
-pip install openai          # for text-embedding-3-*
-pip install voyageai        # for voyage-3.5-lite
-pip install google-generativeai  # for gemini-embedding-001 / text-embedding-004
+cp .env.example .env
+# Optional:
+# ANTHROPIC_API_KEY=...   # image descriptions
+# OPENAI_API_KEY=...
+# VOYAGE_API_KEY=...
+# GEMINI_API_KEY=...
+# DOC2MD_KB_DIR=./.doc2md_kb
+# ENABLE_IMAGE_DESC=1     # local SmolVLM for PDF/DOCX/PPTX images
 ```
 
-## Running Tests
+## Tests
 
 ```bash
 pip install pytest

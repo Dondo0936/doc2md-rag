@@ -497,6 +497,194 @@ def _extract_csv(file_path: str) -> str:
     return df.to_markdown(index=False)
 
 
+def _extract_xlsx(file_path: str) -> str:
+    """Extract Excel workbooks sheet-by-sheet as markdown tables."""
+    try:
+        sheets = pd.read_excel(file_path, sheet_name=None, engine="openpyxl")
+    except Exception:
+        sheets = pd.read_excel(file_path, sheet_name=None)
+
+    parts = []
+    for name, df in sheets.items():
+        parts.append(f"## Sheet: {name}")
+        parts.append("")
+        parts.append(df.to_markdown(index=False))
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def _extract_text_file(file_path: str) -> str:
+    for encoding in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            with open(file_path, "r", encoding=encoding) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def _extract_html_file(file_path: str) -> str:
+    """Convert local HTML to markdown via MarkItDown, with a plain-text fallback."""
+    try:
+        from markitdown import MarkItDown
+        mid = MarkItDown()
+        result = mid.convert(file_path)
+        if result.text_content and result.text_content.strip():
+            return result.text_content
+    except Exception as e:
+        logger.warning("MarkItDown HTML conversion failed (%s)", e)
+
+    from html.parser import HTMLParser as _HP
+
+    class _TextExtractor(_HP):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+            self._skip = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "noscript"):
+                self._skip = True
+            elif tag in ("p", "div", "br", "h1", "h2", "h3", "h4", "li", "tr"):
+                self.parts.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "noscript"):
+                self._skip = False
+
+        def handle_data(self, data):
+            if not self._skip and data.strip():
+                self.parts.append(data)
+
+    extractor = _TextExtractor()
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        extractor.feed(f.read())
+    return re.sub(r"\n{3,}", "\n\n", "".join(extractor.parts)).strip()
+
+
+def _extract_image(file_path: str, llm_client=None) -> str:
+    """Describe an image file for indexing.
+
+    Prefer Claude Vision when an LLM client is available; otherwise try
+    MarkItDown / a lightweight metadata placeholder.
+    """
+    import base64
+    import mimetypes
+
+    name = os.path.basename(file_path)
+    mime, _ = mimetypes.guess_type(file_path)
+    mime = mime or "image/png"
+
+    if llm_client is not None:
+        try:
+            with open(file_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            data_uri = f"data:{mime};base64,{b64}"
+            description = _describe_image_with_vision(data_uri, llm_client)
+            return f"# Image: {name}\n\n{description}"
+        except Exception as e:
+            logger.warning("Vision description failed for %s: %s", name, e)
+
+    try:
+        from markitdown import MarkItDown
+        mid = MarkItDown()
+        result = mid.convert(file_path)
+        if result.text_content and result.text_content.strip():
+            return f"# Image: {name}\n\n{result.text_content}"
+    except Exception as e:
+        logger.debug("MarkItDown image convert skipped: %s", e)
+
+    size_kb = os.path.getsize(file_path) / 1024
+    return (
+        f"# Image: {name}\n\n"
+        f"[Image placeholder — {mime}, {size_kb:.1f} KB. "
+        f"Set ANTHROPIC_API_KEY / pass an LLM client for vision descriptions.]"
+    )
+
+
+def _download_url(url: str, timeout: int = 30) -> tuple[str, str]:
+    """Download a URL to a temp file. Returns (temp_path, content_type)."""
+    import urllib.parse
+    import urllib.request
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Doc2MD-RAG/2.0 (+https://github.com/Dondo0936/doc2md-rag)"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        data = resp.read()
+
+    # Pick extension from content-type or URL path
+    ext_map = {
+        "text/html": ".html",
+        "application/pdf": ".pdf",
+        "text/plain": ".txt",
+        "text/markdown": ".md",
+        "application/json": ".txt",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-excel": ".xls",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    ext = ext_map.get(content_type)
+    if not ext:
+        path_ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
+        ext = path_ext if path_ext else ".html"
+
+    fd, tmp_path = tempfile.mkstemp(suffix=ext)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    return tmp_path, content_type
+
+
+def process_url(url: str, llm_client=None) -> dict:
+    """Fetch a URL and run it through the conversion pipeline."""
+    from config import SUPPORTED_URL_SCHEMES
+
+    if not any(url.startswith(s) for s in SUPPORTED_URL_SCHEMES):
+        raise ValueError(f"Unsupported URL scheme. Use one of: {SUPPORTED_URL_SCHEMES}")
+
+    tmp_path = None
+    try:
+        tmp_path, _ = _download_url(url)
+        result = process_document(tmp_path, llm_client=llm_client, source_label=url)
+        result["source"] = url
+        return result
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def process_source(source: str, llm_client=None) -> dict:
+    """Ingest a local path or URL into markdown.
+
+    This is the primary entry point for CLI / MCP / KnowledgeBase.
+    """
+    from config import SUPPORTED_URL_SCHEMES
+
+    source = source.strip()
+    if "://" in source.split()[0]:
+        # Explicit scheme — only allow supported URL schemes
+        if not any(source.startswith(s) for s in SUPPORTED_URL_SCHEMES):
+            raise ValueError(f"Unsupported URL scheme. Use one of: {SUPPORTED_URL_SCHEMES}")
+        return process_url(source, llm_client=llm_client)
+    return process_document(source, llm_client=llm_client)
+
+
 def _collapse_spaced_caps(text: str) -> str:
     """Collapse spaced-out capital headers: 'C A P I T A L' → 'CAPITAL'.
 
@@ -517,9 +705,10 @@ def _strip_page_numbers(text: str) -> str:
 
 
 def _extract_markdown(file_path: str, llm_client=None) -> str:
-    """Extract markdown from PDF, DOCX, PPTX, or CSV.
+    """Extract markdown from supported file types.
 
     Uses Docling as primary backend for PDF/DOCX/PPTX, with legacy fallbacks.
+    Also supports CSV/XLSX, HTML, plain text/markdown, and images.
     """
     file_size = os.path.getsize(file_path)
     if file_size > MAX_FILE_SIZE_BYTES:
@@ -527,10 +716,23 @@ def _extract_markdown(file_path: str, llm_client=None) -> str:
 
     ext = os.path.splitext(file_path)[1].lower()
 
+    # Lightweight / tabular formats
     if ext == ".csv":
         return _extract_csv(file_path)
+    if ext in (".xlsx", ".xls"):
+        return _extract_xlsx(file_path)
+    if ext in (".txt", ".md", ".markdown"):
+        return _extract_text_file(file_path)
+    if ext in (".html", ".htm"):
+        return _extract_html_file(file_path)
+    if ext in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"):
+        return _extract_image(file_path, llm_client=llm_client)
+
     if ext not in (".pdf", ".docx", ".pptx"):
-        raise ValueError(f"Unsupported file type: {ext}")
+        raise ValueError(
+            f"Unsupported file type: {ext}. "
+            f"Supported: pdf, docx, pptx, csv, xlsx, html, txt, md, images"
+        )
 
     # Detect scanned PDFs for OCR routing
     use_ocr = False
@@ -952,7 +1154,7 @@ def _handle_images(markdown: str, llm_client=None) -> tuple:
     return transformed, images_found
 
 
-def process_document(file_path: str, llm_client=None) -> dict:
+def process_document(file_path: str, llm_client=None, source_label: str | None = None) -> dict:
     """Full conversion pipeline: extract → tables to lists → image handling.
 
     Returns:
@@ -960,14 +1162,12 @@ def process_document(file_path: str, llm_client=None) -> dict:
             "raw_markdown": str,
             "tables_converted": str,
             "final_markdown": str,
+            "source": str,
             "stats": {"tables_found": int, "images_found": int, "char_count": int}
         }
     """
-    # Validate file path is within temp directory to prevent path traversal
-    real_path = os.path.realpath(file_path)
-    temp_dir = os.path.realpath(tempfile.gettempdir())
-    if not real_path.startswith(temp_dir) and not os.path.isabs(file_path):
-        raise ValueError(f"Invalid file path: must be an absolute path or within temp directory")
+    # Resolve path; accept absolute or relative filesystem paths for CLI/MCP use.
+    real_path = os.path.realpath(os.path.expanduser(file_path))
     if not os.path.isfile(real_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -985,6 +1185,7 @@ def process_document(file_path: str, llm_client=None) -> dict:
         "raw_markdown": raw_markdown,
         "tables_converted": tables_converted,
         "final_markdown": final_markdown,
+        "source": source_label or real_path,
         "stats": {
             "tables_found": tables_found,
             "images_found": images_found,

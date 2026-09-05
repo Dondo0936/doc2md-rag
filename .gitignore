@@ -8,3 +8,7 @@ build/
 .streamlit/secrets.toml
 *.tmp
 .DS_Store
+.doc2md_kb/
+.kb/
+.venv/
+venv/

@@ -1,0 +1,3 @@
+# Sample knowledge for examples/connect_app.py
+Our refund policy allows customers to return unused items within 30 days of purchase.
+Shipping is free on orders over $50. Enterprise plans include SSO and audit logs.

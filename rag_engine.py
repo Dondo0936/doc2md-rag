@@ -104,46 +104,72 @@ class RAGEngine:
         overlap: int = 50,
         semantic_threshold: float = 0.5,
     ) -> None:
-        """Chunk the markdown and build both BM25 and FAISS indexes."""
+        """Chunk the markdown and rebuild both BM25 and FAISS indexes (replaces existing)."""
+        self.clear()
+        self.add_document(
+            markdown,
+            source=source,
+            method=method,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            semantic_threshold=semantic_threshold,
+        )
+
+    def add_document(
+        self,
+        markdown: str,
+        source: str = "document",
+        method: str = "Recursive",
+        chunk_size: int = 400,
+        overlap: int = 50,
+        semantic_threshold: float = 0.5,
+    ) -> int:
+        """Append a document to the existing indexes. Returns number of chunks added."""
         if chunk_size < 1:
             raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
         if overlap < 0 or overlap >= chunk_size:
             raise ValueError(f"overlap must be in [0, chunk_size), got {overlap}")
-        self.clear()
-        self._total_doc_chars = len(markdown)
 
+        self._total_doc_chars += len(markdown)
         texts = self._chunk(markdown, method, chunk_size, overlap, semantic_threshold)
+        if not texts:
+            return 0
 
-        # Compute character offsets by finding each chunk in the original text
+        start_id = len(self.chunks)
         offset = 0
+        new_chunks = []
         for i, text in enumerate(texts):
             start = markdown.find(text[:80], offset)
             if start == -1:
                 start = offset
             end = start + len(text)
-            self.chunks.append({
+            new_chunks.append({
                 "text": text,
-                "chunk_id": i,
+                "chunk_id": start_id + i,
                 "source": source,
                 "start_char": start,
                 "end_char": end,
             })
             offset = start + 1
 
-        if not self.chunks:
-            return
+        self.chunks.extend(new_chunks)
 
-        # Build BM25 index
+        # Rebuild BM25 over full corpus (BM25Okapi has no efficient incremental API)
         tokenized = [self._tokenize(c["text"]) for c in self.chunks]
         self.bm25 = BM25Okapi(tokenized)
         self._cache_idf(tokenized)
 
-        # Build FAISS index
-        texts_list = [c["text"] for c in self.chunks]
-        self.chunk_embeddings = self.model.encode(texts_list, normalize_embeddings=True)
-        dim = self.chunk_embeddings.shape[1]
-        self.faiss_index = faiss.IndexFlatIP(dim)
-        self.faiss_index.add(self.chunk_embeddings.astype(np.float32))
+        # Incremental FAISS add for new embeddings
+        new_texts = [c["text"] for c in new_chunks]
+        new_embeddings = self.model.encode(new_texts, normalize_embeddings=True)
+        if self.chunk_embeddings is None:
+            self.chunk_embeddings = new_embeddings
+            dim = new_embeddings.shape[1]
+            self.faiss_index = faiss.IndexFlatIP(dim)
+        else:
+            self.chunk_embeddings = np.vstack([self.chunk_embeddings, new_embeddings])
+        self.faiss_index.add(new_embeddings.astype(np.float32))
+        return len(new_chunks)
 
     def _chunk(self, text, method, chunk_size, overlap, semantic_threshold):
         if method == "Recursive":
@@ -303,6 +329,7 @@ class RAGEngine:
             results.append({
                 "text": chunk["text"],
                 "chunk_id": chunk["chunk_id"],
+                "source": chunk.get("source", "document"),
                 "score": float(combined[idx]),
                 "bm25_score": float(bm25_scores[idx]),
                 "faiss_score": float(vector_scores[idx]),
