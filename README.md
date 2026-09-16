@@ -111,6 +111,10 @@ pip install pytest
 pytest tests/ -v
 ```
 
+## Platform UI (experimental)
+
+Next.js Parser module shell lives in [`frontend/`](frontend/). See [`frontend/README.md`](frontend/README.md) (`npm run dev`, API at `NEXT_PUBLIC_API_URL`, default `http://localhost:8000`).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -8,3 +8,10 @@ build/
 .streamlit/secrets.toml
 *.tmp
 .DS_Store
+
+# Next.js platform frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env*.local
