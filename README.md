@@ -53,8 +53,25 @@ doc2md-rag/
 ├── claude_wrapper.py   # OpenAI-compatible wrapper for Anthropic API
 ├── config.py           # Constants + parameter defaults + tooltips
 ├── tests/              # Test suite
+├── packages/
+│   └── corpus-truth/   # corpus_truth SDK (standalone, pip-installable)
 └── requirements.txt
 ```
+
+## corpus_truth SDK
+
+`packages/corpus-truth/` is a standalone, dependency-free library for versioning a
+corpus *inside someone else's* RAG stack: it assigns revisions to typed chunks,
+returns an add/remove plan for any vector store, keeps history in SQLite, and
+produces an LLM-readable changelog of what changed between revisions. It is
+independent of the Streamlit app above.
+
+```bash
+pip install ./packages/corpus-truth
+cd packages/corpus-truth && pytest tests -q
+```
+
+See [packages/corpus-truth/README.md](packages/corpus-truth/README.md) for usage.
 
 ## How It Works
 
