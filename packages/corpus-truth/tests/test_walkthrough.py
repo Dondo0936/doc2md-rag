@@ -3,6 +3,8 @@
 Mirrors the README so the documented flow stays honest.
 """
 
+import json
+
 from conftest import policy_v1, policy_v2
 
 from corpus_truth import ImageChunk, InMemoryIndex, Ledger, TableChunk, TextChunk
@@ -91,6 +93,17 @@ def test_plan_json_matches_the_documented_shape(tmp_path):
         assert (diff["from_rev"], diff["to_rev"]) == (1, 2)
         assert [change["key"] for change in diff["changed"]] == ["refund", "pricing", "fig1"]
         assert diff["changed"][1]["cells"] == [{"row": 1, "col": 1, "ref": "B2", "from": "9", "to": "12"}]
+
+
+def test_every_returned_object_serializes_to_json(tmp_path):
+    index = InMemoryIndex()
+    with Ledger.open(":memory:") as ledger:
+        index.apply(ledger.commit("policy", policy_v1()))
+        plan = ledger.commit("policy", policy_v2())
+        index.apply(plan)
+
+        for payload in (plan.to_dict(), ledger.diff("policy").to_dict(), ledger.reconcile(index).to_dict()):
+            assert json.loads(json.dumps(payload)) == payload
 
 
 def test_a_hash_only_corpus_still_versions_correctly(tmp_path):

@@ -252,33 +252,39 @@ class Ledger:
     def current(self, doc_id: str) -> list[Posting]:
         """Postings that should be searchable right now. Empty for a deleted document."""
         doc_id = _require_doc_id(doc_id)
-        self._require_head(doc_id)
-        return self._store.current_postings(doc_id)
+        with self._lock:
+            self._require_head(doc_id)
+            return self._store.current_postings(doc_id)
 
     def as_of(self, doc_id: str, rev: int | None = None) -> list[Posting]:
         """Postings that were current at ``rev`` (default: the latest revision)."""
         doc_id = _require_doc_id(doc_id)
-        head = self._require_head(doc_id)
-        target = head.rev if rev is None else int(rev)
-        self._require_revision(doc_id, target)
-        return self._store.postings_as_of(doc_id, target)
+        with self._lock:
+            head = self._require_head(doc_id)
+            target = head.rev if rev is None else int(rev)
+            self._require_revision(doc_id, target)
+            return self._store.postings_as_of(doc_id, target)
 
     def lineage(self, doc_id: str, chunk_key: str) -> list[Posting]:
         """Every posting that has ever held one slot, oldest first -- the uuid-x -> uuid-y trail."""
         doc_id = _require_doc_id(doc_id)
-        self._require_head(doc_id)
-        return self._store.lineage(doc_id, chunk_key)
+        with self._lock:
+            self._require_head(doc_id)
+            return self._store.lineage(doc_id, chunk_key)
 
     def head(self, doc_id: str) -> DocumentHead:
-        return self._require_head(_require_doc_id(doc_id))
+        with self._lock:
+            return self._require_head(_require_doc_id(doc_id))
 
     def revisions(self, doc_id: str) -> list[Revision]:
         doc_id = _require_doc_id(doc_id)
-        self._require_head(doc_id)
-        return self._store.revisions(doc_id)
+        with self._lock:
+            self._require_head(doc_id)
+            return self._store.revisions(doc_id)
 
     def documents(self) -> list[str]:
-        return self._store.document_ids()
+        with self._lock:
+            return self._store.document_ids()
 
     # -- diffs ------------------------------------------------------------
 
@@ -289,36 +295,35 @@ class Ledger:
         to diff against an empty document.
         """
         doc_id = _require_doc_id(doc_id)
-        head = self._require_head(doc_id)
-        target = head.rev if to_rev is None else int(to_rev)
-        to_revision = self._require_revision(doc_id, target)
+        with self._lock:
+            head = self._require_head(doc_id)
+            target = head.rev if to_rev is None else int(to_rev)
+            to_revision = self._require_revision(doc_id, target)
 
-        if from_rev is None:
-            source = to_revision.parent_rev
-        else:
-            source = int(from_rev)
-        if source is not None and source > target:
-            raise ValueError(f"from_rev {source} is after to_rev {target}")
+            source = to_revision.parent_rev if from_rev is None else int(from_rev)
+            if source is not None and source > target:
+                raise ValueError(f"from_rev {source} is after to_rev {target}")
 
-        if source is None or source == 0:
-            from_postings: list[Posting] = []
-        else:
-            self._require_revision(doc_id, source)
-            from_postings = self._store.postings_as_of(doc_id, source)
+            if source is None or source == 0:
+                from_postings: list[Posting] = []
+            else:
+                self._require_revision(doc_id, source)
+                from_postings = self._store.postings_as_of(doc_id, source)
 
-        return compute_diff(
-            doc_id,
-            from_rev=source,
-            to_rev=target,
-            from_postings=from_postings,
-            to_postings=self._store.postings_as_of(doc_id, target),
-            deleted=to_revision.action in TOMBSTONE_ACTIONS,
-        )
+            return compute_diff(
+                doc_id,
+                from_rev=source,
+                to_rev=target,
+                from_postings=from_postings,
+                to_postings=self._store.postings_as_of(doc_id, target),
+                deleted=to_revision.action in TOMBSTONE_ACTIONS,
+            )
 
     def diff_prompt(self, doc_id: str, from_rev: int | None = None, to_rev: int | None = None) -> str:
         """The same changelog as short markdown, ready to staple onto a prompt."""
-        diff = self.diff(doc_id, from_rev=from_rev, to_rev=to_rev)
-        return render_prompt(diff, current_rev=self._require_head(doc_id).rev)
+        with self._lock:
+            diff = self.diff(doc_id, from_rev=from_rev, to_rev=to_rev)
+            return render_prompt(diff, current_rev=self._require_head(doc_id).rev)
 
     # -- drift ------------------------------------------------------------
 

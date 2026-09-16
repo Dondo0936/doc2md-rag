@@ -76,6 +76,8 @@ def test_unknown_documents_and_revisions_raise(ledger):
     ledger.commit("policy", policy_v1())
     with pytest.raises(RevisionNotFoundError, match="revision 7"):
         ledger.as_of("policy", rev=7)
+    with pytest.raises(RevisionNotFoundError, match="revision 0"):
+        ledger.as_of("policy", rev=0)
 
 
 def test_ledger_survives_a_restart(tmp_path):
