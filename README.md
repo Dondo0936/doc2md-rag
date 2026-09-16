@@ -28,11 +28,39 @@ git clone https://github.com/YOUR_USERNAME/doc2md-rag.git
 cd doc2md-rag
 pip install -r requirements.txt
 
-# Run
+# Run Streamlit demo
 streamlit run app.py
 ```
 
 Open `http://localhost:8501` in your browser.
+
+### Parser Platform API (FastAPI)
+
+Structured blocks are the source of truth; markdown is an export. The Streamlit app is unchanged.
+
+```bash
+pip install -r requirements.txt -r backend/requirements.txt
+make run-api
+# → http://localhost:8000/docs
+```
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/parse/file` | Multipart file upload |
+| `POST` | `/api/v1/parse/text` | JSON `{ "text", "format" }` |
+| `POST` | `/api/v1/parse/url` | JSON `{ "url" }` (SSRF-safe) |
+| `GET` | `/api/v1/parse/{job_id}` | Poll async jobs |
+| `GET` | `/api/v1/health` | Readiness |
+
+```bash
+# Example: paste text
+curl -s http://localhost:8000/api/v1/parse/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"# Hello\\n\\nWorld","format":"markdown"}' | head
+
+# Example: upload a file
+curl -s http://localhost:8000/api/v1/parse/file -F file=@notes.txt
+```
 
 ### Optional: Claude Vision for image descriptions
 
@@ -46,13 +74,21 @@ Or enter your API key in the sidebar under "API Configuration". Without an API k
 
 ```
 doc2md-rag/
-├── app.py              # Streamlit UI + orchestration
-├── converter.py        # Doc → Markdown (tables→lists, images→descriptions)
+├── app.py              # Streamlit UI + orchestration (unchanged)
+├── converter.py        # Shared Doc → Markdown extractors (reused by API)
+├── backend/            # FastAPI Parser Platform Module
+│   ├── app/
+│   │   ├── main.py     # API entrypoint
+│   │   ├── models/     # Block / ParseResult contract
+│   │   ├── pipeline/   # Orchestrator, registry, extractors, adapters
+│   │   └── exporters/  # Markdown export from blocks
+│   ├── requirements.txt
+│   └── tests/
 ├── rag_engine.py       # Chunking, FAISS+BM25 indexing, search, evaluation
 ├── tracer.py           # Pipeline visualization (Plotly charts)
 ├── claude_wrapper.py   # OpenAI-compatible wrapper for Anthropic API
 ├── config.py           # Constants + parameter defaults + tooltips
-├── tests/              # Test suite
+├── tests/              # Legacy Streamlit / converter tests
 └── requirements.txt
 ```
 
